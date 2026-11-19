@@ -380,16 +380,18 @@ def _analyze_image_bytes_sync(image_bytes: bytes, attributes: list[Any] | None =
     bg_dom_list = _quantize_dominant_colors(bg_strip, n_colors=4)
     bg_rgb = bg_dom_list[0][0]
 
-    # Center 14..34 (20x20) box for foreground object
-    fg_crop = img.crop((14, 14, 34, 34))
-    fg_dom_list = _quantize_dominant_colors(fg_crop, n_colors=4)
+    # Center 10..38 (28x28) box for full foreground object inspection
+    fg_crop = img.crop((10, 10, 38, 38))
+    fg_all_pixels = list(fg_crop.getdata())
+    # Keep only true object pixels that differ from the backdrop color
+    obj_pixels = [px for px in fg_all_pixels if _rgb_distance(px, bg_rgb) >= 22.0]
+    if len(obj_pixels) < 12:
+        obj_pixels = fg_all_pixels
 
-    # Prefer foreground color distinct from backdrop when available
+    obj_strip = Image.new("RGB", (len(obj_pixels), 1))
+    obj_strip.putdata(obj_pixels)
+    fg_dom_list = _quantize_dominant_colors(obj_strip, n_colors=4)
     fg_rgb = fg_dom_list[0][0]
-    for candidate_rgb, _ in fg_dom_list:
-        if _rgb_distance(candidate_rgb, bg_rgb) >= 24.0:
-            fg_rgb = candidate_rgb
-            break
 
     # Build top 3 clean, visually distinct hex swatches
     swatch_rgbs: list[tuple[int, int, int]] = [bg_rgb]
@@ -398,7 +400,6 @@ def _analyze_image_bytes_sync(image_bytes: bytes, attributes: list[Any] | None =
             swatch_rgbs.append(candidate_rgb)
         if len(swatch_rgbs) >= 3:
             break
-    # Pad to 3 swatches if image is ultra-monochrome
     for candidate_rgb, _ in fg_dom_list + bg_dom_list:
         if len(swatch_rgbs) >= 3:
             break
@@ -406,7 +407,7 @@ def _analyze_image_bytes_sync(image_bytes: bytes, attributes: list[Any] | None =
             swatch_rgbs.append(candidate_rgb)
     color_swatches = [_rgb_to_hex(c) for c in swatch_rgbs[:3]]
 
-    # HSV conversion
+    # HSV conversion for backdrop & primary foreground
     bg_h, bg_s, bg_v = colorsys.rgb_to_hsv(bg_rgb[0] / 255.0, bg_rgb[1] / 255.0, bg_rgb[2] / 255.0)
     fg_h, fg_s, fg_v = colorsys.rgb_to_hsv(fg_rgb[0] / 255.0, fg_rgb[1] / 255.0, fg_rgb[2] / 255.0)
     hue_diff = _hue_diff_degrees(fg_h, bg_h)
@@ -415,13 +416,41 @@ def _analyze_image_bytes_sync(image_bytes: bytes, attributes: list[Any] | None =
     fg_lum = _rgb_luminance(fg_rgb)
     lum_diff = abs(fg_lum - bg_lum)
 
-    # Monochrome detector
-    is_low_sat_mono = fg_s < 0.18 and bg_s < 0.18
-    is_hue_mono = (
-        hue_diff <= 24.0
-        and (abs(fg_v - bg_v) >= 0.08 or abs(fg_s - bg_s) >= 0.10)
+    # STRICT PIXEL-WIDE MONOCHROME DETECTOR:
+    # Checks ALL foreground object pixels so multicolored objects (e.g. brown+green cookie on blue bg)
+    # are NEVER falsely tagged as Monochrome!
+    total_obj = max(len(obj_pixels), 1)
+    same_hue_px = 0
+    achromatic_px = 0
+    clashing_color_px = 0
+    for r, g, b in obj_pixels:
+        ph, ps, pv = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+        p_hue_diff = _hue_diff_degrees(ph, bg_h)
+        if ps <= 0.18 or pv <= 0.16:
+            achromatic_px += 1
+            same_hue_px += 1  # neutral white/black highlights/shadows don't break monochrome
+        elif p_hue_diff <= 18.0:
+            same_hue_px += 1
+        elif p_hue_diff > 30.0 and ps >= 0.24:
+            clashing_color_px += 1
+
+    same_hue_ratio = same_hue_px / total_obj
+    achromatic_ratio = achromatic_px / total_obj
+    clashing_ratio = clashing_color_px / total_obj
+
+    bg_is_achromatic = bg_s <= 0.15 or bg_v <= 0.16
+    # Case 1: True Black/White/Grey Monochrome (neutral bg + >=82% neutral object)
+    is_achromatic_mono = bg_is_achromatic and achromatic_ratio >= 0.82 and clashing_ratio <= 0.08
+    # Case 2: True Same-Color Monochrome (colored bg + >=75% same hue + <=10% other colors + distinct fg)
+    is_color_mono = (
+        not bg_is_achromatic
+        and bg_s >= 0.18
+        and same_hue_ratio >= 0.75
+        and clashing_ratio <= 0.10
+        and achromatic_ratio < 0.75
+        and hue_diff <= 20.0
     )
-    is_monochrome = is_low_sat_mono or is_hue_mono
+    is_monochrome = is_achromatic_mono or is_color_mono
 
     # Combine pixel buckets + attribute name buckets for Luxury Whitelist
     bg_buckets = _classify_hsv_bucket(bg_rgb) | _text_color_buckets(backdrop_name)

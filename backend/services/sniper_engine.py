@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import time
 from typing import Any, Awaitable, Callable
 
 from loguru import logger
@@ -98,6 +99,7 @@ class SniperEngine:
         self._task: asyncio.Task[None] | None = None
         self._running = False
         self._seen_keys: set[str] = set()
+        self._last_rule_alert_ts: dict[int, float] = {}
         self._send_tg_alert: Callable[[AnalyzedListing, str], Awaitable[bool]] | None = None
 
     def register_telegram_sender(
@@ -170,13 +172,30 @@ class SniperEngine:
 
         listings = await analytics_engine.get_analyzed_listings(sort="discount_desc", limit=50)
         triggered_alerts: list[dict[str, Any]] = []
+        now_ts = time.time()
 
         for listing in listings:
+            # Quality gate: never spam Telegram with generic low-visual or above-floor noise
+            is_visual_gem = (
+                listing.visual_score >= 7.8
+                or listing.is_monochrome
+                or bool(listing.harmony_label)
+                or listing.number_bonus_percent >= 8.0
+            )
+            is_real_underfloor = listing.price <= listing.collection_floor * 1.02 and listing.discount_percent >= 15.0
+            if not (is_visual_gem or is_real_underfloor):
+                continue
+
             for rule in rules:
                 if not self._listing_matches_rule(listing, rule):
                     continue
 
-                dedup_key = f"{rule['id']}:{listing.id}:{listing.price}"
+                # Anti-spam cooldown: max 1 alert per rule every 5 minutes
+                rule_id = int(rule["id"])
+                if now_ts - self._last_rule_alert_ts.get(rule_id, 0.0) < 300.0:
+                    continue
+
+                dedup_key = f"{rule_id}:{listing.tg_id or listing.id}"
                 if dedup_key in self._seen_keys:
                     continue
 
@@ -184,6 +203,7 @@ class SniperEngine:
                 if len(self._seen_keys) > 2000:
                     self._seen_keys.clear()
                 self._seen_keys.add(dedup_key)
+                self._last_rule_alert_ts[rule_id] = now_ts
 
                 # Check risk guard if autobuy mode
                 autobuy_note = ""
