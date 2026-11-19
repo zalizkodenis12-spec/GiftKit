@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+
+# Ensure repo root is on sys.path when launched from backend/ (e.g., Vercel Services entrypoint main:app)
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,7 +20,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
-from backend.config import IS_VERCEL, base_settings, runtime_config
+from backend.config import IS_VERCEL, SECRET_KEYS, base_settings, runtime_config
 from backend.database import db, utc_now_iso
 from backend.models import (
     OfferOutbidRequest,
@@ -503,6 +509,10 @@ async def get_settings() -> dict[str, Any]:
 @app.patch("/api/settings")
 async def patch_settings(body: SettingsUpdate) -> dict[str, Any]:
     updates = body.model_dump(exclude_none=True)
+    # In production Vercel mode, secrets are locked exclusively to encrypted server Environment Variables
+    if IS_VERCEL:
+        for secret_k in SECRET_KEYS:
+            updates.pop(secret_k, None)
     old_token = runtime_config.tg_bot_token
     await db.save_settings(updates)
 

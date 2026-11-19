@@ -97,12 +97,10 @@ SECRET_KEYS = {
 
 
 def mask_secret(value: str) -> str:
-    """Return safely masked representation of a secret token/key."""
+    """Return completely opaque masked representation — zero characters ever exposed."""
     if not value:
         return ""
-    if len(value) <= 8:
-        return "••••••••"
-    return f"{value[:4]}••••{value[-4:]}"
+    return "••••••••"
 
 
 class RuntimeConfig:

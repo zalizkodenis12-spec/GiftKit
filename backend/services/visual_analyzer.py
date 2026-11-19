@@ -766,10 +766,6 @@ class VisualAnalyzer:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=4.0)) as client:
                 if ai_provider == "gemini":
-                    url = (
-                        "https://generativelanguage.googleapis.com/v1beta/models/"
-                        f"gemini-2.0-flash:generateContent?key={gemini_key}"
-                    )
                     payload = {
                         "contents": [
                             {
@@ -781,18 +777,29 @@ class VisualAnalyzer:
                         ],
                         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 250},
                     }
-                    resp = await client.post(url, json=payload)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        raw_txt = (
-                            data.get("candidates", [{}])[0]
-                            .get("content", {})
-                            .get("parts", [{}])[0]
-                            .get("text", "")
+                    for model_id in ("gemini-2.5-flash", "gemini-3.8-flash"):
+                        url = (
+                            "https://generativelanguage.googleapis.com/v1beta/models/"
+                            f"{model_id}:generateContent"
                         )
-                        llm_parsed = self._parse_llm_json(raw_txt)
-                    else:
-                        logger.warning(f"Gemini Vision API returned HTTP {resp.status_code}")
+                        resp = await client.post(
+                            url,
+                            headers={"x-goog-api-key": gemini_key},
+                            json=payload,
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            raw_txt = (
+                                data.get("candidates", [{}])[0]
+                                .get("content", {})
+                                .get("parts", [{}])[0]
+                                .get("text", "")
+                            )
+                            llm_parsed = self._parse_llm_json(raw_txt)
+                            if llm_parsed:
+                                break
+                        else:
+                            logger.warning(f"Gemini Vision ({model_id}) returned HTTP {resp.status_code}")
 
                 elif ai_provider == "openai":
                     resp = await client.post(
