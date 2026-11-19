@@ -68,12 +68,115 @@ _NEON_BLUE_KW = {
 
 
 # ==============================================================================
-# PART A — REGEX NICE-NUMBER ANALYZER
+# PART A — REGEX NICE-NUMBER & BACKGROUND SYMBOL (ICON) ANALYZERS
 # ==============================================================================
+
+_CULT_NUMBERS: set[int] = {
+    7, 13, 21, 42, 69, 77, 88, 99, 100, 111, 222, 333, 404, 420, 555, 666, 777, 888, 999,
+    1000, 1111, 1234, 1337, 2000, 2222, 3333, 4200, 4444, 5000, 5555, 6666, 6969,
+    7777, 8888, 9999, 10000, 12345, 54321, 69420, 77777, 88888, 99999, 100000,
+}
+
+_SEQUENTIAL_RUNS: tuple[str, ...] = (
+    "01234", "12345", "23456", "34567", "45678", "56789",
+    "98765", "87654", "76543", "65432", "54321", "43210",
+    "0123", "1234", "2345", "3456", "4567", "5678", "6789",
+    "9876", "8765", "7654", "6543", "5432", "4321", "3210",
+)
+
+# Tier-1 high-demand background symbols (watermark icons on Telegram Gifts)
+_TOP_SYMBOL_KEYWORDS: tuple[str, ...] = (
+    "ton", "telegram", "diamond", "crystal", "crown", "bitcoin", "btc",
+    "dollar", "money", "coin", "pepe", "frog", "skull", "dragon", "phoenix",
+    "flame", "fire", "star", "heart", "rocket", "cat", "rose", "lightning",
+    "bolt", "sword", "infinity", "moon", "gem", "gold", "durov", "king",
+    "wings", "angel", "devil", "alien", "ufo", "clover", "spade", "shield",
+    "key", "eye", "pyramid", "wolf", "lion", "shark", "tiger", "panda",
+    "butterfly", "ghost", "spider", "bat", "chess", "420", "champagne",
+)
+
+# Semantic theme clusters for Symbol <-> Model/Collection synergy matching
+_THEME_GROUPS: dict[str, set[str]] = {
+    "love": {"heart", "love", "rose", "cupid", "kiss", "valentine", "romance", "locket", "ring", "bouquet", "flower", "tulip", "sakura", "cherry"},
+    "wealth": {"ton", "telegram", "diamond", "crystal", "gem", "crown", "king", "queen", "gold", "golden", "money", "dollar", "bitcoin", "btc", "coin", "bank", "watch", "swiss", "ring", "signet", "cigar", "loot", "bag", "rich", "luxury", "bar", "ingot", "vault"},
+    "dark": {"skull", "death", "ghost", "bat", "spider", "devil", "demon", "hell", "pumpkin", "witch", "reaper", "mask", "vampire", "coffin", "bone", "grave", "dark", "shadow", "phantom", "voodoo", "curse", "evil", "grim"},
+    "space": {"star", "moon", "planet", "rocket", "ufo", "alien", "astronaut", "astral", "cosmic", "galaxy", "comet", "meteor", "sun", "solar", "eclipse", "saturn", "orbit", "nebula", "space", "shard"},
+    "fire": {"flame", "fire", "dragon", "phoenix", "lightning", "bolt", "thunder", "sword", "blade", "spark", "inferno", "lava", "blaze", "volcano", "torch", "candle", "lighter"},
+    "animal": {"cat", "kitty", "paw", "dog", "puppy", "pepe", "frog", "bear", "lion", "wolf", "shark", "tiger", "panda", "bunny", "rabbit", "duck", "bird", "owl", "fox", "snake", "monkey", "fish", "whale", "butterfly", "bee", "horse", "unicorn"},
+    "party": {"cake", "cupcake", "candle", "champagne", "wine", "cocktail", "gift", "balloon", "cookie", "sweet", "candy", "lollipop", "ice", "cream", "party", "confetti", "star", "hat", "cap", "jelly"},
+    "magic": {"crystal", "magic", "wand", "potion", "eye", "pyramid", "infinity", "angel", "wings", "clover", "luck", "lucky", "horseshoe", "key", "lock", "shield", "chess", "tarot", "rune", "mystic"},
+}
+
+
+def analyze_symbol_trait(
+    symbol_name: str,
+    model_name: str = "",
+    collection_name: str = "",
+    symbol_rarity: float = 2.0,
+    symbol_floor: float = 0.0,
+    collection_floor: float = 0.0,
+) -> dict[str, Any]:
+    """Evaluate background icon (symbol) appeal: thematic synergy, hype tier & real floor premium."""
+    sym = (symbol_name or "").strip()
+    if not sym:
+        return {"symbol_bonus_percent": 0.0, "symbol_badge": None, "symbol_is_synergy": False}
+
+    sym_low = sym.lower()
+    ctx_low = f"{model_name} {collection_name}".lower()
+
+    sym_words = {w for w in re.findall(r"[a-z0-9]+", sym_low) if len(w) >= 3}
+    ctx_words = {w for w in re.findall(r"[a-z0-9]+", ctx_low) if len(w) >= 3}
+
+    # 1. Exact or thematic Symbol <-> Model/Collection synergy (e.g. Heart + Rose, Diamond + Ring, Skull + Witch)
+    direct_overlap = bool(sym_words & ctx_words)
+    theme_overlap = False
+    if not direct_overlap:
+        for kw_set in _THEME_GROUPS.values():
+            if any(k in sym_low for k in kw_set) and any(k in ctx_low for k in kw_set):
+                theme_overlap = True
+                break
+    is_synergy = direct_overlap or theme_overlap
+
+    # 2. Real market floor premium on Portals for this background symbol
+    floor_premium_pct = 0.0
+    if collection_floor > 0 and symbol_floor > collection_floor:
+        floor_premium_pct = ((symbol_floor - collection_floor) / collection_floor) * 100.0
+
+    # 3. Tier-1 universally popular collector symbols
+    is_top_icon = any(kw in sym_low for kw in _TOP_SYMBOL_KEYWORDS)
+    is_ultra_rare = 0.0 < symbol_rarity <= 0.55
+
+    bonus = 0.0
+    badge: str | None = None
+
+    if is_synergy and (is_top_icon or floor_premium_pct >= 12.0 or is_ultra_rare):
+        bonus = 11.0
+        badge = f"Іконка в тему: {sym}"
+    elif is_synergy:
+        bonus = 8.5
+        badge = f"Іконка в тему: {sym}"
+    elif floor_premium_pct >= 20.0:
+        bonus = 9.0
+        badge = f"Топ іконка: {sym} (+{floor_premium_pct:.0f}%)"
+    elif is_top_icon and (is_ultra_rare or floor_premium_pct >= 10.0):
+        bonus = 8.0
+        badge = f"Топ іконка: {sym}"
+    elif is_top_icon:
+        bonus = 5.0
+        badge = f"Іконка: {sym}"
+    elif is_ultra_rare:
+        bonus = 6.0
+        badge = f"Рідкісна іконка: {sym} ({symbol_rarity:.1f}%)"
+
+    return {
+        "symbol_bonus_percent": round(min(14.0, bonus), 1),
+        "symbol_badge": badge,
+        "symbol_is_synergy": is_synergy,
+    }
 
 
 def analyze_number_pattern(number: int) -> dict[str, Any]:
-    """Evaluate collectible serial number patterns and return Fair Value bonus (up to +28%)."""
+    """Evaluate collectible serial number patterns and return Fair Value bonus (up to +30%)."""
     if not isinstance(number, int) or number <= 0:
         return {
             "number_bonus_percent": 0.0,
@@ -84,41 +187,72 @@ def analyze_number_pattern(number: int) -> dict[str, Any]:
     s = str(number)
     matches: list[tuple[str, float]] = []
 
-    # 1. Low mint tiers
+    # 1. Cult / iconic collector numbers
+    if number in _CULT_NUMBERS:
+        matches.append(("Культовий номер", 22.0))
+
+    # 2. Low mint tiers
     if number < 100:
-        matches.append(("Топ-100", 25.0))
+        matches.append(("Топ-100", 26.0))
     elif number < 1000:
-        matches.append(("Low Mint <1K", 15.0))
+        matches.append(("Low Mint <1K", 16.0))
     elif number < 5000:
-        matches.append(("Низький <5K", 6.0))
+        matches.append(("Низький <5K", 7.0))
 
-    # 2. 3+ identical consecutive digits (777, 333, 000, 888, 17772)
-    rep_match = re.search(r"(\d)\1{2,}", s)
-    if rep_match:
-        matches.append((f"Повтор {rep_match.group(0)}", 18.0))
+    # 3. 4+ or 3+ identical consecutive digits (7777, 777, 333, 000, 888, 17772)
+    rep4 = re.search(r"(\d)\1{3,}", s)
+    rep3 = re.search(r"(\d)\1{2,}", s)
+    if rep4:
+        matches.append((f"Четвірка {rep4.group(0)}", 24.0))
+    elif rep3:
+        matches.append((f"Повтор {rep3.group(0)}", 18.0))
 
-    # 3. Palindrome (12321, 50405, 1221, 777)
+    # 4. Palindrome / mirror (12321, 50405, 1221, 8448)
     if len(s) >= 3 and s == s[::-1]:
-        matches.append(("Паліндром", 14.0))
+        matches.append(("Паліндром", 15.0))
 
-    # 4. Repeating blocks & Round numbers
+    # 5. Sequential ladders (1234, 4321, 12345, 9876)
+    for seq in _SEQUENTIAL_RUNS:
+        if seq in s:
+            matches.append((f"Послідовність {seq}", 15.0 if len(seq) >= 5 else 13.0))
+            break
+
+    # 6. Symmetric & repeating blocks (AABB, ABAB, ABCABC, AABBCC, AAABBB, AABCC like #33755)
     m_aabb = re.fullmatch(r"(\d)\1(\d)\2", s)
     m_abab = re.fullmatch(r"(\d)(\d)\1\2", s)
-    if m_aabb and m_aabb.group(1) != m_aabb.group(2):
-        matches.append(("Блок AABB", 10.0))
+    m_abcabc = re.fullmatch(r"(\d)(\d)(\d)\1\2\3", s)
+    m_aabbcc = re.fullmatch(r"(\d)\1(\d)\2(\d)\3", s)
+    m_aaabbb = re.fullmatch(r"(\d)\1\1(\d)\2\2", s)
+    if m_aaabbb and m_aaabbb.group(1) != m_aaabbb.group(2):
+        matches.append(("Блок AAABBB", 18.0))
+    elif m_abcabc:
+        matches.append(("Блок ABCABC", 15.0))
+    elif m_aabbcc:
+        matches.append(("Блок AABBCC", 14.0))
+    elif m_aabb and m_aabb.group(1) != m_aabb.group(2):
+        matches.append(("Блок AABB", 12.0))
     elif m_abab and m_abab.group(1) != m_abab.group(2):
-        matches.append(("Блок ABAB", 9.0))
+        matches.append(("Блок ABAB", 11.0))
     else:
         # AABCC / ABBCC / AABBC / embedded AABB like #33755 or #14488
         m_aabcc = re.search(r"(\d)\1\d(\d)\2", s)
         m_pair_pair = re.search(r"(\d)\1(\d)\2", s)
         if m_aabcc and m_aabcc.group(1) != m_aabcc.group(2):
-            matches.append(("Красивий блок", 8.0))
+            matches.append(("Красивий блок", 9.0))
         elif m_pair_pair and m_pair_pair.group(1) != m_pair_pair.group(2):
-            matches.append(("Красивий блок", 8.0))
+            matches.append(("Красивий блок", 9.0))
 
-    if (number >= 1000 and number % 1000 == 0) or (number >= 500 and number % 500 == 0):
-        matches.append(("Круглий номер", 10.0))
+    # 7. Only 2 distinct digits in a 5+ digit number (e.g. #70707, #81881, #22020)
+    if len(s) >= 5 and len(set(s)) == 2:
+        matches.append(("2-цифровий номер", 11.0))
+
+    # 8. Clean round numbers (1000, 5000, 12000, 500, 1500)
+    if number >= 1000 and number % 1000 == 0:
+        matches.append(("Круглий номер", 12.0))
+    elif number >= 500 and number % 500 == 0:
+        matches.append(("Круглий номер", 9.0))
+    elif 100 <= number < 10000 and number % 100 == 0:
+        matches.append(("Рівна сотня", 8.0))
 
     if not matches:
         return {
@@ -131,7 +265,7 @@ def analyze_number_pattern(number: int) -> dict[str, Any]:
     matches.sort(key=lambda item: item[1], reverse=True)
     primary_label, primary_bonus = matches[0]
 
-    # Combine secondary distinct patterns gently, hard-capped at +28%
+    # Combine secondary distinct patterns gently, hard-capped at +30%
     total_bonus = primary_bonus
     secondary_labels: list[str] = []
     for lbl, b in matches[1:]:
@@ -140,7 +274,7 @@ def analyze_number_pattern(number: int) -> dict[str, Any]:
             if len(secondary_labels) < 1:
                 secondary_labels.append(lbl)
 
-    total_bonus = round(min(28.0, total_bonus), 1)
+    total_bonus = round(min(30.0, total_bonus), 1)
     if secondary_labels:
         pattern_text = f"{primary_label} + {secondary_labels[0]} #{number}"
     else:
@@ -789,15 +923,20 @@ class VisualAnalyzer:
 
         model_name, backdrop_name, symbol_name = _extract_attr_names(attributes)
         prompt = (
-            "Ти — професійний оцінювач Telegram Gift NFT на TON. "
+            "Ти — досвідчений фліпер та жорсткий оцінювач Telegram Gift NFT на TON. "
             f"Колекція: {collection_name or 'Telegram Gift'} #{number}. "
-            f"Атрибути: Модель={model_name or 'N/A'}, Фон={backdrop_name or 'N/A'}, Символ={symbol_name or 'N/A'}. "
+            f"Атрибути: Модель={model_name or 'N/A'}, Фон={backdrop_name or 'N/A'}, Фоновий символ (іконки на фоні)={symbol_name or 'N/A'}. "
             f"Ціна: {price or 'N/A'} TON, Fair Value: {fair_value or 'N/A'} TON. "
-            "Оціни візуальну естетику, читабельність силуету, гармонію кольорів та колекційну привабливість для фліпу. "
+            "Суворо оціни візуал як реальний покупець:\n"
+            "1) is_monochrome = true ЛИШЕ коли сам предмет і фон реально одного кольору/відтінку (чорний на чорному, синій на синьому, рожевий на рожевому тощо). Якщо предмет різнокольоровий або іншого кольору ніж фон — СТРОГО is_monochrome: false!\n"
+            "2) Оціни чи пасують фонові іконки (символ) до подарунка та чи виглядає композиція стильно/дорого.\n"
+            "3) Якщо кольори строкаті, несмачні або це звичайний пересічний лот — став visual_score <= 6.8 і worth_alert: false. "
+            "Став visual_score >= 8.0 і worth_alert: true ТІЛЬКИ якщо картинка реально кайфова, чиста і продасться дорожче флора.\n"
             "Поверни ЛИШЕ валідний JSON без markdown і без емодзі: "
-            '{"visual_score": 8.5, "visual_tag": "Топ візуал" | "Стильний" | "Стандарт" | "Візуальний шум", '
+            '{"visual_score": 8.5, "is_monochrome": false, "worth_alert": true, '
+            '"visual_tag": "Топ візуал" | "Стильний" | "Стандарт" | "Візуальний шум", '
             '"harmony_label": "коротка назва поєднання або null", '
-            '"ai_vision_comment": "1-2 чітких речення українською чому це гарний чи слабкий візуал для фліпу"}.'
+            '"ai_vision_comment": "1-2 чітких речення українською чому це годний чи слабкий візуал для фліпу"}.'
         )
 
         llm_parsed: dict[str, Any] | None = None
@@ -876,8 +1015,16 @@ class VisualAnalyzer:
                 ai_score = round(max(1.0, min(10.0, ai_score)), 1)
                 combined["visual_score"] = ai_score
                 combined["visual_tag"] = str(llm_parsed.get("visual_tag") or _score_to_tag(ai_score))
+                if "is_monochrome" in llm_parsed and isinstance(llm_parsed["is_monochrome"], bool):
+                    combined["is_monochrome"] = llm_parsed["is_monochrome"]
+                    if not llm_parsed["is_monochrome"] and combined.get("harmony_label") == "Монохром":
+                        combined["harmony_label"] = None
+                if "worth_alert" in llm_parsed and isinstance(llm_parsed["worth_alert"], bool):
+                    combined["worth_alert"] = llm_parsed["worth_alert"]
                 if llm_parsed.get("harmony_label"):
-                    combined["harmony_label"] = str(llm_parsed["harmony_label"])
+                    hl = str(llm_parsed["harmony_label"]).strip()
+                    if hl.lower() not in {"null", "none", ""}:
+                        combined["harmony_label"] = hl
                 if llm_parsed.get("ai_vision_comment"):
                     # Strip any stray emojis
                     comment_clean = re.sub(

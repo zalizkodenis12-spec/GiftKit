@@ -18,7 +18,12 @@ export const NftCard: React.FC<NftCardProps> = ({ item, tonUsd, onSelect }) => {
   const visualScore = typeof item.visual_score === 'number' ? item.visual_score : null;
   const hasHighVisual = visualScore !== null && visualScore >= 7.8;
   const swatches = (item.color_swatches || []).filter(Boolean).slice(0, 3);
-  const highlightTag = item.harmony_label || item.trend_label || item.number_pattern || null;
+  const highlightTag =
+    item.harmony_label ||
+    item.number_pattern ||
+    item.symbol_badge ||
+    item.trend_label ||
+    null;
 
   return (
     <button

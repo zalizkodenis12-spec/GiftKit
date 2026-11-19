@@ -52,6 +52,8 @@ export interface AnalyzedListing {
   is_rare_combo: boolean;
   combo_label?: string | null;
   number_badge?: 'Low Mint' | 'Palindrome' | 'Repeating' | string | null;
+  symbol_badge?: string | null;
+  symbol_bonus_percent?: number | null;
   thin_floor_warning?: string | null;
   wash_trade_risk: boolean;
   best_sell_market: MarketName | string;

@@ -34,7 +34,7 @@ from backend.services.portals_client import (
     to_int,
 )
 from backend.services.trend_tracker import trend_tracker
-from backend.services.visual_analyzer import analyze_number_pattern, visual_analyzer
+from backend.services.visual_analyzer import analyze_number_pattern, analyze_symbol_trait, visual_analyzer
 
 # Color/theme families for Rare Combo Detection
 COMBO_FAMILIES: list[tuple[str, str, set[str]]] = [
@@ -409,10 +409,13 @@ class AnalyticsEngine:
         attributes: list[TraitAttribute] = []
         model_floor = collection_floor
         backdrop_floor = collection_floor
+        symbol_floor = collection_floor
         model_name = ""
         backdrop_name = ""
+        symbol_name = ""
         model_rarity = 5.0
         backdrop_rarity = 5.0
+        symbol_rarity = 2.0
         symbol_rarity_bonus = 0.0
 
         for attr in raw.get("attributes") or []:
@@ -449,11 +452,15 @@ class AnalyticsEngine:
                     t_floor = round(collection_floor * (1.0 + (1.8 - rarity) * 0.18), 2)
                 backdrop_floor = max(collection_floor, t_floor)
             elif atype == "symbol":
+                symbol_name = val
+                symbol_rarity = rarity
                 matched = symbol_lookup.get(val.lower())
                 if matched:
                     t_floor = matched["floor_price"] if matched["floor_price"] > 0 else collection_floor
                     t_supply = matched["supply"]
                     rarity = matched["rarity_percent"] or rarity
+                    symbol_rarity = rarity
+                symbol_floor = max(collection_floor, t_floor)
                 if 0 < rarity <= 0.6:
                     symbol_rarity_bonus = 0.06
                 elif 0 < rarity <= 1.0:
@@ -482,6 +489,18 @@ class AnalyticsEngine:
         number_bonus_percent = float(num_info["number_bonus_percent"])
         serial_bonus = number_bonus_percent / 100.0
 
+        sym_info = analyze_symbol_trait(
+            symbol_name=symbol_name,
+            model_name=model_name,
+            collection_name=collection_name,
+            symbol_rarity=symbol_rarity,
+            symbol_floor=symbol_floor,
+            collection_floor=collection_floor,
+        )
+        symbol_badge = sym_info["symbol_badge"]
+        symbol_bonus_percent = float(sym_info["symbol_bonus_percent"])
+        symbol_effective_bonus = max(symbol_rarity_bonus, symbol_bonus_percent / 100.0)
+
         is_combo, combo_label, combo_bonus = detect_rare_combo(
             model_name, backdrop_name, model_rarity, backdrop_rarity
         )
@@ -489,7 +508,7 @@ class AnalyticsEngine:
         trend_boost_percent, trend_label = trend_tracker.get_backdrop_boost(backdrop_name)
         trend_bonus = trend_boost_percent / 100.0
 
-        total_multiplier = 1.0 + serial_bonus + combo_bonus + symbol_rarity_bonus + trend_bonus
+        total_multiplier = 1.0 + serial_bonus + combo_bonus + symbol_effective_bonus + trend_bonus
         fair_value = round(base_fair * total_multiplier, 2)
         fair_value = max(fair_value, round(collection_floor, 2))
 
@@ -568,6 +587,8 @@ class AnalyticsEngine:
             number_badge=number_badge,
             number_pattern=number_pattern,
             number_bonus_percent=number_bonus_percent,
+            symbol_badge=symbol_badge,
+            symbol_bonus_percent=symbol_bonus_percent,
             trend_boost_percent=trend_boost_percent,
             trend_label=trend_label,
             thin_floor_warning=thin_warning,

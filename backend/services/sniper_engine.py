@@ -13,7 +13,40 @@ from backend.config import base_settings, runtime_config
 from backend.database import db
 from backend.models import AnalyzedListing
 from backend.services.analytics_engine import analytics_engine
+from backend.services.visual_analyzer import visual_analyzer
 from backend.services.ws_manager import ws_manager
+
+
+def _collect_gem_reasons(listing: AnalyzedListing) -> list[str]:
+    """Return crisp Ukrainian reasons why a listing is genuinely worth flipping."""
+    reasons: list[str] = []
+    near_floor = listing.collection_floor <= 0 or listing.price <= listing.collection_floor * 1.08
+
+    if listing.is_monochrome and near_floor:
+        reasons.append("Монохром")
+    elif listing.harmony_label and near_floor:
+        reasons.append(listing.harmony_label)
+
+    if listing.number_bonus_percent >= 14.0:
+        reasons.append(listing.number_pattern or f"Топ номер #{listing.number}")
+    elif listing.number_bonus_percent >= 8.0 and near_floor:
+        reasons.append(listing.number_pattern or f"Красивий номер #{listing.number}")
+
+    if listing.symbol_badge and listing.symbol_bonus_percent >= 7.5 and near_floor:
+        reasons.append(listing.symbol_badge)
+
+    if (
+        listing.collection_floor > 0
+        and listing.price <= listing.collection_floor * 0.95
+        and listing.discount_percent >= 12.0
+    ):
+        pct_below = round((1.0 - listing.price / listing.collection_floor) * 100.0, 1)
+        reasons.append(f"Нижче флора (-{pct_below}%)")
+
+    if listing.visual_score >= 8.2 and near_floor and not reasons:
+        reasons.append(f"Топ візуал {listing.visual_score:.1f}/10")
+
+    return reasons
 
 
 def format_telegram_alert_html(listing: AnalyzedListing, rule_name: str = "Снайпер PRO") -> str:
@@ -50,8 +83,24 @@ def format_telegram_alert_html(listing: AnalyzedListing, rule_name: str = "Сн�
     )
     number_bonus_txt = f" (+{listing.number_bonus_percent:.0f}%)" if listing.number_bonus_percent > 0 else ""
     badge_line = (
-        f"\n<b>Номер:</b> {html.escape(number_text)}{number_bonus_txt}"
+        f"\n<b>Красивий номер:</b> {html.escape(number_text)}{number_bonus_txt}"
         if number_text
+        else ""
+    )
+
+    # Background symbol (icon) line
+    symbol_bonus_txt = f" (+{listing.symbol_bonus_percent:.0f}%)" if listing.symbol_bonus_percent > 0 else ""
+    symbol_line = (
+        f"\n<b>Фонова іконка:</b> {html.escape(listing.symbol_badge)}{symbol_bonus_txt}"
+        if listing.symbol_badge
+        else ""
+    )
+
+    # Exact reason why this deal passed the strict filter
+    reasons = _collect_gem_reasons(listing)
+    reasons_line = (
+        f"\n<b>Чому годний:</b> {html.escape(' + '.join(reasons[:3]))}"
+        if reasons
         else ""
     )
 
@@ -78,7 +127,7 @@ def format_telegram_alert_html(listing: AnalyzedListing, rule_name: str = "Сн�
 
     return (
         f"<b>СНАЙПЕР-СИГНАЛ [{mode_tag}]</b>\n"
-        f"Правило: <i>{rule_esc}</i>\n\n"
+        f"Правило: <i>{rule_esc}</i>{reasons_line}\n\n"
         f"<b>{title}</b> ({listing.market.upper()})\n"
         f"Ціна лота: <b>{listing.price} TON</b>\n"
         f"Флор колекції: <b>{listing.collection_floor} TON</b> | Флор моделі: <b>{listing.model_floor} TON</b>\n"
@@ -86,7 +135,7 @@ def format_telegram_alert_html(listing: AnalyzedListing, rule_name: str = "Сн�
         f"Чистий профіт після комісій: <b>{listing.net_profit_ton:+.2f} TON ({listing.net_profit_percent:+.1f}%)</b> -> продаж на <b>{listing.best_sell_market.upper()}</b>\n"
         f"Ліквідність: <b>{listing.liquidity_score}/100</b> | Продажів 24г: <b>{listing.sales_24h}</b>\n"
         f"Останні продажі: <code>{sales_block}</code>"
-        f"{visual_line}{badge_line}{trend_line}{combo_line}{thin_line}{vision_note}\n\n"
+        f"{visual_line}{badge_line}{symbol_line}{trend_line}{combo_line}{thin_line}{vision_note}\n\n"
         f"<b>Трейт-аналіз:</b>\n{attrs_block}\n\n"
         f"Вердикт: <b>{html.escape(listing.verdict_label)}</b>"
     )
@@ -175,20 +224,14 @@ class SniperEngine:
         now_ts = time.time()
 
         for listing in listings:
-            # Quality gate: never spam Telegram with generic low-visual or above-floor noise
-            near_floor = listing.collection_floor <= 0 or listing.price <= listing.collection_floor * 1.05
-            is_true_visual_gem = (
-                listing.is_monochrome
-                or bool(listing.harmony_label)
-                or listing.visual_score >= 8.0
-            ) and near_floor
-            is_nice_number_deal = listing.number_bonus_percent >= 10.0 and near_floor
-            is_real_underfloor = (
-                listing.collection_floor > 0
-                and listing.price <= listing.collection_floor * 0.96
-                and listing.discount_percent >= 12.0
-            )
-            if not (is_true_visual_gem or is_nice_number_deal or is_real_underfloor):
+            # Liquidity guard: skip dead illiquid collections
+            if listing.liquidity_score < 35:
+                continue
+
+            # Pre-filter: must have at least one genuine trader edge
+            # (nice number, thematic/top background icon, true monochrome/luxury combo, or real below-floor price)
+            pre_reasons = _collect_gem_reasons(listing)
+            if not pre_reasons:
                 continue
 
             for rule in rules:
@@ -207,7 +250,68 @@ class SniperEngine:
                 # Prevent unbounded memory growth
                 if len(self._seen_keys) > 2000:
                     self._seen_keys.clear()
+                # Mark seen BEFORE AI call so rejected trash isn't re-evaluated every 18s
                 self._seen_keys.add(dedup_key)
+
+                # FINAL GATE: verify finalist with Gemini AI Vision (when key is set) so ugly/false-monochrome
+                # lots are NEVER sent to Telegram!
+                try:
+                    attrs_dicts = [{"type": a.type, "value": a.value} for a in listing.attributes]
+                    ai_res = await visual_analyzer.evaluate_with_ai_vision(
+                        photo_url=listing.photo_url,
+                        collection_name=listing.collection_name,
+                        number=listing.number,
+                        attributes=attrs_dicts,
+                        price=listing.price,
+                        fair_value=listing.fair_value,
+                    )
+                    listing.visual_score = float(ai_res.get("visual_score", listing.visual_score))
+                    listing.visual_tag = str(ai_res.get("visual_tag", listing.visual_tag))
+                    if "is_monochrome" in ai_res:
+                        listing.is_monochrome = bool(ai_res["is_monochrome"])
+                    if not listing.is_monochrome and listing.harmony_label == "Монохром":
+                        listing.harmony_label = None
+                    elif ai_res.get("harmony_label"):
+                        listing.harmony_label = str(ai_res["harmony_label"])
+                    if ai_res.get("ai_vision_comment"):
+                        listing.ai_vision_comment = str(ai_res["ai_vision_comment"])
+
+                    ai_source = ai_res.get("source")
+                    worth_alert = ai_res.get("worth_alert")
+                    post_reasons = _collect_gem_reasons(listing)
+
+                    has_strong_math_edge = (
+                        listing.number_bonus_percent >= 12.0
+                        or (
+                            listing.symbol_bonus_percent >= 8.5
+                            and listing.price <= listing.collection_floor * 1.03
+                        )
+                        or (
+                            listing.collection_floor > 0
+                            and listing.price <= listing.collection_floor * 0.90
+                        )
+                    )
+
+                    if not post_reasons:
+                        logger.info(
+                            f"Sniper vetoed {listing.collection_name} #{listing.number} after AI verification (no valid edge left)"
+                        )
+                        continue
+
+                    if ai_source in {"gemini", "openai"}:
+                        if worth_alert is False and not has_strong_math_edge:
+                            logger.info(
+                                f"Sniper AI Vision vetoed {listing.collection_name} #{listing.number} (score={listing.visual_score}, worth_alert=False)"
+                            )
+                            continue
+                        if listing.visual_score < 6.0 and not has_strong_math_edge:
+                            logger.info(
+                                f"Sniper AI Vision vetoed weak visual {listing.collection_name} #{listing.number} (score={listing.visual_score})"
+                            )
+                            continue
+                except Exception as exc:
+                    logger.debug(f"Sniper AI verification skipped: {exc}")
+
                 self._last_rule_alert_ts[rule_id] = now_ts
 
                 # Check risk guard if autobuy mode

@@ -65,6 +65,8 @@ class AnalyzedListing(BaseModel):
     color_swatches: list[str] = Field(default_factory=list)
     number_pattern: str | None = None
     number_bonus_percent: float = 0.0
+    symbol_badge: str | None = None
+    symbol_bonus_percent: float = 0.0
     trend_boost_percent: float = 0.0
     trend_label: str | None = None
     ai_vision_comment: str | None = None

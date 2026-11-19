@@ -77,6 +77,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
         item.short_name.toLowerCase().includes(q) ||
         String(item.number).includes(q) ||
         (item.harmony_label || '').toLowerCase().includes(q) ||
+        (item.symbol_badge || '').toLowerCase().includes(q) ||
         (item.trend_label || '').toLowerCase().includes(q) ||
         (item.number_pattern || '').toLowerCase().includes(q) ||
         (item.attributes || []).some((a) => a.value.toLowerCase().includes(q));
