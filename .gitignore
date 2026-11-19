@@ -1,0 +1,48 @@
+# Secrets & local environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Local SQLite database & runtime data
+data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Local binaries, tunnels & SSH keys
+bin/
+*.exe
+*.key
+*.pub
+*.pem
+
+# Logs
+*.log
+logs/
+
+# Python caches & virtualenvs
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node & Frontend build artifacts
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+
+# Vercel & IDE
+.vercel/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

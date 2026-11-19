@@ -1,0 +1,26 @@
+{
+  "name": "GiftKit — TON NFT & Gifts Terminal",
+  "short_name": "GiftKit",
+  "description": "Крос-маркет сканер, аналітика, візуальна AI-оцінка та снайпер Telegram Gifts на TON",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#F4F7FB",
+  "theme_color": "#0098EA",
+  "lang": "uk",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

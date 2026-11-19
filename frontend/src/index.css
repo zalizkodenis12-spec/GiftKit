@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --canvas: #F4F7FB;
+    --surface: #FFFFFF;
+    --border-soft: #E2E8F0;
+    --ton-blue: #0098EA;
+    --ton-blue-dark: #0077C8;
+    --obsidian: #0B1120;
+    --ice-tint: #E8F5FE;
+    --ice-active: #D4ECFD;
+  }
+
+  html,
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior-y: none;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: 'Plus Jakarta Sans', 'Inter', -apple-system, sans-serif;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.ton-card {
+  background-color: #FFFFFF;
+  border: 1px solid #E4ECF7;
+  box-shadow: 0 4px 20px rgba(15, 45, 95, 0.05);
+}
+
+.ton-card-hover {
+  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+}
+
+.ton-card-hover:hover {
+  border-color: #93D5FB;
+  box-shadow: 0 8px 24px rgba(0, 152, 234, 0.12);
+}
+
+.ton-btn-primary {
+  background: linear-gradient(135deg, #0098EA 0%, #0077C8 100%);
+  color: #FFFFFF;
+  box-shadow: 0 6px 16px rgba(0, 152, 234, 0.25);
+  transition: transform 0.12s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+
+.ton-btn-primary:hover {
+  box-shadow: 0 8px 20px rgba(0, 152, 234, 0.35);
+}
+
+.ton-btn-primary:active {
+  transform: scale(0.98);
+}
+
+.ton-gradient-banner {
+  background: linear-gradient(135deg, #0B1120 0%, #0066AD 48%, #0098EA 100%);
+  box-shadow: 0 12px 28px rgba(0, 119, 200, 0.24);
+}
+
+/* Custom subtle scrollbars for horizontal carousels */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+@keyframes slideUpSheet {
+  from {
+    transform: translateY(100%);
+    opacity: 0.7;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.animate-sheet-up {
+  animation: slideUpSheet 0.24s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.18s ease-out forwards;
+}
+
+@keyframes toastPop {
+  from {
+    opacity: 0;
+    transform: translateY(-12px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-toast {
+  animation: toastPop 0.22s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
