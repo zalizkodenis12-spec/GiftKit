@@ -176,14 +176,19 @@ class SniperEngine:
 
         for listing in listings:
             # Quality gate: never spam Telegram with generic low-visual or above-floor noise
-            is_visual_gem = (
-                listing.visual_score >= 7.8
-                or listing.is_monochrome
+            near_floor = listing.collection_floor <= 0 or listing.price <= listing.collection_floor * 1.05
+            is_true_visual_gem = (
+                listing.is_monochrome
                 or bool(listing.harmony_label)
-                or listing.number_bonus_percent >= 8.0
+                or listing.visual_score >= 8.0
+            ) and near_floor
+            is_nice_number_deal = listing.number_bonus_percent >= 10.0 and near_floor
+            is_real_underfloor = (
+                listing.collection_floor > 0
+                and listing.price <= listing.collection_floor * 0.96
+                and listing.discount_percent >= 12.0
             )
-            is_real_underfloor = listing.price <= listing.collection_floor * 1.02 and listing.discount_percent >= 15.0
-            if not (is_visual_gem or is_real_underfloor):
+            if not (is_true_visual_gem or is_nice_number_deal or is_real_underfloor):
                 continue
 
             for rule in rules:

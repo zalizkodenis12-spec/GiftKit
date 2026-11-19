@@ -483,36 +483,43 @@ def _analyze_image_bytes_sync(image_bytes: bytes, attributes: list[Any] | None =
     )
 
     # Aesthetic Computer Vision Score (1.0 - 10.0)
-    score = 6.2
+    score = 5.8
 
     # Silhouette readability (luminance contrast)
     if 0.22 <= lum_diff <= 0.78:
-        score += 1.2
+        score += 0.8
     elif 0.14 <= lum_diff < 0.22 or lum_diff > 0.78:
-        score += 0.5
+        score += 0.35
     elif lum_diff < 0.11:
-        score -= 1.3
+        score -= 1.2
 
     # Harmony & Luxury bonuses
     if harmony_bonus >= 14.0:
-        score += 1.9
+        score += 2.1
     elif harmony_bonus >= 12.0:
-        score += 1.6
+        score += 1.8
     elif harmony_bonus >= 9.0:
-        score += 1.2
+        score += 1.4
 
     if is_monochrome and harmony_label != "Монохром":
         score += 0.4
 
-    # Saturation balance
+    # Saturation balance & multi-color mismatch penalty
     avg_sat = (fg_s + bg_s) / 2.0
     if 0.12 <= avg_sat <= 0.66:
-        score += 0.35
+        score += 0.25
     elif is_clashing_neon:
         score -= 1.9
 
+    if not is_monochrome and harmony_bonus == 0.0 and clashing_ratio >= 0.45:
+        score -= 0.45
+
     if lum_diff < 0.12 and is_clashing_neon:
         score -= 0.7
+
+    # Plain items without monochrome or luxury harmony never exceed 7.1
+    if not is_monochrome and not harmony_label:
+        score = min(score, 7.1)
 
     visual_score = round(max(1.0, min(9.7, score)), 1)
     visual_tag = _score_to_tag(visual_score)
@@ -549,7 +556,9 @@ def _heuristic_fallback_from_attributes(attributes: list[Any] | None = None) -> 
     bg_buckets = _text_color_buckets(backdrop_name)
     fg_buckets = _text_color_buckets(model_name)
 
-    is_monochrome = bool(bg_buckets and fg_buckets and (bg_buckets & fg_buckets))
+    is_monochrome = bool(
+        len(bg_buckets) == 1 and len(fg_buckets) == 1 and bg_buckets == fg_buckets
+    )
     whitelist_label, whitelist_bonus = _check_luxury_whitelist(bg_buckets, fg_buckets, backdrop_name)
 
     harmony_label: str | None = None
