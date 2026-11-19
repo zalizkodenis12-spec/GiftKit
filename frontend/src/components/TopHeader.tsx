@@ -122,10 +122,11 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
     );
   };
 
-  const tonUsd = overview?.ton_usd ?? 1.03;
-  const tonChange = overview?.ton_change_24h ?? 0.87;
-  const isUp = tonChange >= 0;
+  const tonUsd = overview?.ton_usd ?? null;
+  const tonChange = overview?.ton_change_24h ?? null;
+  const isUp = (tonChange ?? 0) >= 0;
   const isDryRun = overview?.dry_run ?? true;
+  const isLiveConnected = wsConnected || Boolean(overview);
 
   return (
     <header className="sticky top-0 z-30 w-full backdrop-blur-md bg-white/94 border-b border-[#E2E8F0]">
@@ -150,9 +151,9 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             />
             <Diamond className="w-4.5 h-4.5 text-white fill-white/25 -z-10 absolute" />
             <span
-              title={wsConnected ? 'WebSocket LIVE' : 'Перепідключення...'}
+              title={isLiveConnected ? 'LIVE підключено' : 'Підключення до сервера...'}
               className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${
-                wsConnected ? 'bg-[#0098EA]' : 'bg-[#64748B] animate-pulse'
+                isLiveConnected ? 'bg-[#0098EA]' : 'bg-[#64748B] animate-pulse'
               }`}
             />
           </div>
@@ -168,14 +169,20 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
             <div className="flex items-center gap-1.5 mt-0.5">
               <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#64748B] tabular-nums">
                 <span className="text-[#0098EA] font-bold">TON</span>
-                <span className="text-[#0B1120] font-bold">${tonUsd.toFixed(2)}</span>
-                <span
-                  className={`font-bold ${
-                    isUp ? 'text-[#0098EA]' : 'text-[#334155]'
-                  }`}
-                >
-                  {formatPercent(tonChange)}
-                </span>
+                {tonUsd !== null ? (
+                  <>
+                    <span className="text-[#0B1120] font-bold">${tonUsd.toFixed(2)}</span>
+                    <span
+                      className={`font-bold ${
+                        isUp ? 'text-[#0098EA]' : 'text-[#334155]'
+                      }`}
+                    >
+                      {formatPercent(tonChange ?? 0)}
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-[#64748B] font-semibold">синхронізація...</span>
+                )}
               </span>
             </div>
           </div>

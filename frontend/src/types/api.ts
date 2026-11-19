@@ -79,10 +79,12 @@ export interface AnalyzedListing {
 export interface TrendingBackdrop {
   name: string;
   backdrop?: string;
+  swatch_hex?: string;
   color_hex?: string;
   hex?: string;
   avg_premium_percent: number;
-  collection_count: number;
+  collections_count?: number;
+  collection_count?: number;
   fair_value_boost_percent?: number;
   boost_percent?: number;
   sales_24h?: number;
@@ -91,6 +93,7 @@ export interface TrendingBackdrop {
 
 export interface TrendsResponse {
   trending_backdrops: TrendingBackdrop[];
+  top_visual_picks?: AnalyzedListing[];
   top_visual_finds?: AnalyzedListing[];
   top_visual_listings?: AnalyzedListing[];
   updated_at?: string;

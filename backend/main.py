@@ -4,14 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import types
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-# Ensure repo root is on sys.path when launched from backend/ (e.g., Vercel Services entrypoint main:app)
-_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+# Support BOTH local launch (`uvicorn backend.main:app` from repo root)
+# AND Vercel Services (`root: "backend/"`, `entrypoint: "main:app"` where files live in /var/task/).
+_BACKEND_DIR = Path(__file__).resolve().parent
+if _BACKEND_DIR.name == "backend":
+    _PROJECT_ROOT = str(_BACKEND_DIR.parent)
+    if _PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, _PROJECT_ROOT)
+else:
+    if str(_BACKEND_DIR) not in sys.path:
+        sys.path.insert(0, str(_BACKEND_DIR))
+    if "backend" not in sys.modules:
+        _pkg = types.ModuleType("backend")
+        _pkg.__path__ = [str(_BACKEND_DIR)]
+        _pkg.__package__ = "backend"
+        sys.modules["backend"] = _pkg
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -145,11 +157,22 @@ app.add_middleware(
 # ==============================================================================
 
 
+@app.get("/api/health")
+async def get_health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "vercel": IS_VERCEL,
+        "live_markets": multi_market.get_live_markets(),
+        "bot_connected": telegram_bot_service.is_connected,
+        "timestamp": utc_now_iso(),
+    }
+
+
 @app.get("/api/overview")
 async def get_overview() -> dict[str, Any]:
     (ton_usd, ton_change), cols, rules, portfolio, arb = await asyncio.gather(
         getgems_client.get_ton_rate(),
-        analytics_engine.get_collections_summary(limit=100),
+        analytics_engine.get_collections_summary(limit=250),
         db.list_sniper_rules(),
         undercut_engine.build_enriched_portfolio(),
         analytics_engine.get_arbitrage_opportunities(limit=25),

@@ -133,7 +133,11 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
       const trendsRes = await api.getTrends().catch(() => null);
       if (trendsRes) {
         setTrendingBackdrops(trendsRes.trending_backdrops || []);
-        const picks = trendsRes.top_visual_finds || trendsRes.top_visual_listings || [];
+        const picks =
+          trendsRes.top_visual_picks ||
+          trendsRes.top_visual_finds ||
+          trendsRes.top_visual_listings ||
+          [];
         if (picks.length > 0) {
           setTopVisualFinds(picks);
           return;
@@ -684,7 +688,8 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
               <div className="space-y-2">
                 {trendingBackdrops.map((tb, idx) => {
                   const name = tb.name || tb.backdrop || 'Backdrop';
-                  const swatch = tb.color_hex || tb.hex || '#0098EA';
+                  const swatch = tb.swatch_hex || tb.color_hex || tb.hex || '#0098EA';
+                  const colCount = tb.collections_count ?? tb.collection_count ?? 0;
                   const boost =
                     tb.fair_value_boost_percent ??
                     tb.boost_percent ??
@@ -707,7 +712,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                             {name}
                           </p>
                           <p className="text-[10.5px] text-[#64748B] tabular-nums">
-                            {tb.collection_count} колекцій
+                            {colCount} колекцій
                             {tb.sample_collections && tb.sample_collections.length > 0
                               ? ` · ${tb.sample_collections.slice(0, 2).join(', ')}`
                               : ''}

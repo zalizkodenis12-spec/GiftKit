@@ -146,6 +146,16 @@ export const App: React.FC = () => {
 
   const { connected: wsConnected } = useLiveSocket(handleWsEvent);
 
+  // Serverless auto-refresh fallback (e.g. Vercel where WebSockets aren't persistent)
+  useEffect(() => {
+    if (wsConnected) return;
+    const timer = window.setInterval(() => {
+      loadOverview();
+      loadCollections();
+    }, 45000);
+    return () => window.clearInterval(timer);
+  }, [wsConnected, loadOverview, loadCollections]);
+
   const undercutCount = useMemo(
     () => (portfolio?.items || []).filter((i) => i.is_undercut_by_competitor).length,
     [portfolio],

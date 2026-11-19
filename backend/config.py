@@ -9,7 +9,12 @@ from typing import Any
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-IS_VERCEL: bool = bool(os.environ.get("VERCEL"))
+IS_VERCEL: bool = bool(
+    os.environ.get("VERCEL")
+    or os.environ.get("VERCEL_ENV")
+    or os.environ.get("VERCEL_REGION")
+    or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+)
 
 
 class Settings(BaseSettings):
@@ -63,8 +68,13 @@ class Settings(BaseSettings):
             # Resolve relative to project root (parent of backend/)
             project_root = Path(__file__).resolve().parent.parent
             path = project_root / path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return path
+        except OSError:
+            fallback = Path("/tmp/giftkit.db")
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            return fallback
 
 
 # Runtime settings store that merges .env defaults with SQLite overrides

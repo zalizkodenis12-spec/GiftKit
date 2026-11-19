@@ -279,7 +279,9 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
               onChange={(e) => setCollection(e.target.value)}
               className="flex-1 lg:w-[220px] h-9 pl-3 pr-7 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] text-xs font-bold text-[#0B1120] focus:outline-none focus:border-[#0098EA]"
             >
-              <option value="">Всі колекції ({collections.length || 100})</option>
+              <option value="">
+                {collections.length > 0 ? `Всі колекції (${collections.length})` : 'Всі колекції'}
+              </option>
               {collections.map((c) => (
                 <option key={c.short_name} value={c.short_name}>
                   {c.name} — {formatTon(c.floor_price)} TON
