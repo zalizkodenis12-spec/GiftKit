@@ -6,7 +6,6 @@ import {
   ExternalLink,
   Eye,
   Flame,
-  Hash,
   Layers,
   Loader2,
   Palette,
@@ -73,17 +72,47 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
   const [targetSell, setTargetSell] = useState<string>('');
   const [visionLoading, setVisionLoading] = useState(false);
   const [visionProvider, setVisionProvider] = useState<string | null>(null);
+  const [liveSwatches, setLiveSwatches] = useState<string[]>([]);
 
   useEffect(() => {
     if (!item) return;
     setTargetSell(item.fair_value.toFixed(2));
     setVisionProvider(null);
+    setLiveSwatches((item.color_swatches || []).filter(Boolean).slice(0, 4));
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [item?.id, onClose]);
+
+    // Always verify/extract REAL pixel colors from the actual NFT image when opened
+    let cancelled = false;
+    if (item.photo_url && item.photo_url.startsWith('http')) {
+      const modelAttr = item.attributes?.find((a) => a.type === 'model')?.value || '';
+      const backdropAttr = item.attributes?.find((a) => a.type === 'backdrop')?.value || '';
+      const symbolAttr = item.attributes?.find((a) => a.type === 'symbol')?.value || '';
+      api
+        .getPixelColors({
+          photo_url: item.photo_url,
+          model: modelAttr || undefined,
+          backdrop: backdropAttr || undefined,
+          symbol: symbolAttr || undefined,
+        })
+        .then((res) => {
+          if (cancelled) return;
+          if (res.color_swatches && res.color_swatches.length > 0) {
+            setLiveSwatches(res.color_swatches.slice(0, 4));
+          }
+        })
+        .catch(() => {
+          // keep existing swatches if network fails
+        });
+    }
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [item?.id, item?.photo_url, onClose]);
 
   if (!item) return null;
 
@@ -109,7 +138,11 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
           ? 'Стильний'
           : 'Стандарт'
       : 'Аналіз пікселів');
-  const swatches = (item.color_swatches || []).filter(Boolean).slice(0, 3);
+  const swatches = (
+    liveSwatches.length > 0 ? liveSwatches : item.color_swatches || []
+  )
+    .filter(Boolean)
+    .slice(0, 4);
 
   const handleAction = async (
     type: 'buy' | 'offer' | 'portfolio',
@@ -221,11 +254,6 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
                 alt={item.collection_name}
                 className="w-full h-full object-cover"
               />
-              {item.number_badge && (
-                <span className="absolute bottom-1 left-1 right-1 text-center px-1 py-0.5 rounded-md text-[9px] font-extrabold bg-[#0098EA]/92 text-white">
-                  {item.number_badge}
-                </span>
-              )}
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-[11px] font-semibold text-[#64748B] truncate">
@@ -338,34 +366,19 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
               </div>
             )}
 
-            {/* Nice Number & 24h Trend Chips */}
-            {(item.number_pattern || item.trend_label) && (
+            {/* 24h Trend Chip */}
+            {item.trend_label && (
               <div className="flex flex-wrap items-center gap-1.5">
-                {item.number_pattern && (
-                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded-xl bg-white border border-[#BAE3FC] text-[10.5px] font-bold text-[#0B1120] tabular-nums">
-                    <Hash className="w-3 h-3 text-[#0098EA]" />
-                    <span>{item.number_pattern}</span>
-                    {typeof item.number_bonus_percent === 'number' &&
-                      item.number_bonus_percent > 0 && (
-                        <span className="text-[#0077C8] font-extrabold">
-                          (+{item.number_bonus_percent}%)
-                        </span>
-                      )}
-                  </span>
-                )}
-
-                {item.trend_label && (
-                  <span className="inline-flex items-center gap-1 px-2 py-1 rounded-xl bg-[#E8F5FE] border border-[#BAE3FC] text-[10.5px] font-bold text-[#0077C8] tabular-nums">
-                    <Flame className="w-3 h-3 text-[#0098EA]" />
-                    <span>{item.trend_label}</span>
-                    {typeof item.trend_boost_percent === 'number' &&
-                      item.trend_boost_percent > 0 && (
-                        <span className="font-extrabold">
-                          (+{item.trend_boost_percent}%)
-                        </span>
-                      )}
-                  </span>
-                )}
+                <span className="inline-flex items-center gap-1 px-2 py-1 rounded-xl bg-[#E8F5FE] border border-[#BAE3FC] text-[10.5px] font-bold text-[#0077C8] tabular-nums">
+                  <Flame className="w-3 h-3 text-[#0098EA]" />
+                  <span>{item.trend_label}</span>
+                  {typeof item.trend_boost_percent === 'number' &&
+                    item.trend_boost_percent > 0 && (
+                      <span className="font-extrabold">
+                        (+{item.trend_boost_percent}%)
+                      </span>
+                    )}
+                </span>
               </div>
             )}
 

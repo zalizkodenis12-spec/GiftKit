@@ -319,14 +319,14 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
             type="button"
             disabled={refreshing}
             onClick={handleHardRefresh}
-            className="h-10 w-full rounded-xl bg-[#0B1120] hover:bg-[#1E293B] text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60 transition-colors"
+            className="h-10 w-full rounded-xl bg-[#F4F7FB] hover:bg-[#E8F5FE] border border-[#E2E8F0] text-[#0B1120] text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60 transition-colors"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3.5 h-3.5 text-[#0B1120] ${refreshing ? 'animate-spin' : ''}`} />
             <span>Оновити</span>
           </button>
         </div>
 
-        {/* Row 3: Full-Width BLACK Multi-Select "Маркет" Button */}
+        {/* Row 3: Full-Width Light-Grey Multi-Select "Маркет" Button */}
         <div className="w-full relative">
           <button
             type="button"
@@ -334,11 +334,11 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
               haptic('light');
               setShowMarketMenu((v) => !v);
             }}
-            className="h-10 w-full rounded-xl bg-[#0B1120] hover:bg-[#1E293B] text-white text-xs font-bold flex items-center justify-between px-3.5 cursor-pointer transition-colors"
+            className="h-10 w-full rounded-xl bg-[#F4F7FB] hover:bg-[#E8F5FE] border border-[#E2E8F0] text-[#0B1120] text-xs font-bold flex items-center justify-between px-3.5 cursor-pointer transition-colors"
           >
             <span>{marketButtonLabel}</span>
             <ChevronDown
-              className={`w-4 h-4 transition-transform ${showMarketMenu ? 'rotate-180' : ''}`}
+              className={`w-4 h-4 text-[#0B1120] transition-transform ${showMarketMenu ? 'rotate-180' : ''}`}
             />
           </button>
 
@@ -352,12 +352,12 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
                 }}
                 className={`h-9 px-2.5 rounded-lg text-xs font-bold border flex items-center justify-between cursor-pointer transition-colors ${
                   selectedMarkets.length === 0
-                    ? 'bg-[#0B1120] text-white border-[#0B1120]'
-                    : 'bg-[#F8FAFC] text-[#0B1120] border-[#E2E8F0] hover:border-[#BAE3FC]'
+                    ? 'bg-[#E8F5FE] text-[#0077C8] border-[#0098EA]'
+                    : 'bg-[#F4F7FB] text-[#0B1120] border-[#E2E8F0] hover:border-[#BAE3FC]'
                 }`}
               >
                 <span>Всі</span>
-                {selectedMarkets.length === 0 && <Check className="w-3.5 h-3.5" />}
+                {selectedMarkets.length === 0 && <Check className="w-3.5 h-3.5 text-[#0098EA]" />}
               </button>
 
               {MARKET_OPTIONS.map((m) => {
@@ -369,12 +369,12 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
                     onClick={() => toggleMarketChoice(m.key)}
                     className={`h-9 px-2.5 rounded-lg text-xs font-bold border flex items-center justify-between cursor-pointer transition-colors ${
                       isSelected
-                        ? 'bg-[#0B1120] text-white border-[#0B1120]'
-                        : 'bg-[#F8FAFC] text-[#0B1120] border-[#E2E8F0] hover:border-[#BAE3FC]'
+                        ? 'bg-[#E8F5FE] text-[#0077C8] border-[#0098EA]'
+                        : 'bg-[#F4F7FB] text-[#0B1120] border-[#E2E8F0] hover:border-[#BAE3FC]'
                     }`}
                   >
                     <span>{m.label}</span>
-                    {isSelected && <Check className="w-3.5 h-3.5" />}
+                    {isSelected && <Check className="w-3.5 h-3.5 text-[#0098EA]" />}
                   </button>
                 );
               })}
@@ -382,7 +382,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
           )}
         </div>
 
-        {/* Row 4: 50/50 Count + Vertical Divider + BLACK Sort Selector */}
+        {/* Row 4: 50/50 Count + Vertical Divider + Light-Grey Sort Selector */}
         <div className="grid grid-cols-2 items-center pt-2.5 border-t border-[#E2E8F0] divide-x divide-[#CBD5E1]">
           <div className="pr-3 flex items-center justify-center">
             <span className="text-xs font-extrabold text-[#0B1120] tabular-nums">
@@ -394,7 +394,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
             <select
               value={sort}
               onChange={(e) => setSort(e.target.value as SortOption)}
-              className="h-9 w-full px-3 rounded-xl bg-[#0B1120] text-white text-xs font-bold focus:outline-none cursor-pointer"
+              className="h-9 w-full px-3 rounded-xl bg-[#F4F7FB] hover:bg-[#E8F5FE] border border-[#E2E8F0] text-[#0B1120] text-xs font-bold focus:outline-none focus:border-[#0098EA] cursor-pointer transition-colors"
             >
               <option value="discount_desc">Вигода</option>
               <option value="visual_desc">Топ візуал</option>

@@ -471,54 +471,60 @@ def _build_vision_comment(
 
 
 def _analyze_image_bytes_sync(image_bytes: bytes, attributes: list[Any] | None = None) -> dict[str, Any]:
-    """Synchronous Pillow 48x48 pixel analysis (runs in ~2-4ms)."""
+    """Synchronous Pillow 64x64 pixel analysis (runs in ~3-5ms) extracting true NFT colors."""
     model_name, backdrop_name, _ = _extract_attr_names(attributes)
 
     with Image.open(io.BytesIO(image_bytes)) as raw_img:
-        img = raw_img.convert("RGB").resize((48, 48), Image.Resampling.BILINEAR)
+        img = raw_img.convert("RGB").resize((64, 64), Image.Resampling.BILINEAR)
 
-    # Extract outer 6px border ring for backdrop
+    # Extract outer 7px border ring for true backdrop color
     pixels = list(img.getdata())
     bg_pixels: list[tuple[int, int, int]] = []
-    for y in range(48):
-        row_offset = y * 48
-        if y < 6 or y >= 42:
-            bg_pixels.extend(pixels[row_offset : row_offset + 48])
+    for y in range(64):
+        row_offset = y * 64
+        if y < 7 or y >= 57:
+            bg_pixels.extend(pixels[row_offset : row_offset + 64])
         else:
-            bg_pixels.extend(pixels[row_offset : row_offset + 6])
-            bg_pixels.extend(pixels[row_offset + 42 : row_offset + 48])
+            bg_pixels.extend(pixels[row_offset : row_offset + 7])
+            bg_pixels.extend(pixels[row_offset + 57 : row_offset + 64])
 
     bg_strip = Image.new("RGB", (len(bg_pixels), 1))
     bg_strip.putdata(bg_pixels)
     bg_dom_list = _quantize_dominant_colors(bg_strip, n_colors=4)
     bg_rgb = bg_dom_list[0][0]
 
-    # Center 10..38 (28x28) box for full foreground object inspection
-    fg_crop = img.crop((10, 10, 38, 38))
+    # Center 12..52 (40x40) box for full foreground gift inspection
+    fg_crop = img.crop((12, 12, 52, 52))
     fg_all_pixels = list(fg_crop.getdata())
-    # Keep only true object pixels that differ from the backdrop color
-    obj_pixels = [px for px in fg_all_pixels if _rgb_distance(px, bg_rgb) >= 22.0]
-    if len(obj_pixels) < 12:
+    # Keep only true gift pixels that clearly differ from the backdrop color
+    obj_pixels = [px for px in fg_all_pixels if _rgb_distance(px, bg_rgb) >= 24.0]
+    if len(obj_pixels) < 16:
         obj_pixels = fg_all_pixels
 
     obj_strip = Image.new("RGB", (len(obj_pixels), 1))
     obj_strip.putdata(obj_pixels)
-    fg_dom_list = _quantize_dominant_colors(obj_strip, n_colors=4)
+    fg_dom_list = _quantize_dominant_colors(obj_strip, n_colors=8)
     fg_rgb = fg_dom_list[0][0]
 
-    # Build top 3 clean, visually distinct hex swatches
+    # Build top 4 REAL, visually distinct colors of the ENTIRE NFT (backdrop + true gift colors)
     swatch_rgbs: list[tuple[int, int, int]] = [bg_rgb]
-    for candidate_rgb, _ in fg_dom_list + bg_dom_list[1:]:
-        if all(_rgb_distance(candidate_rgb, existing) >= 26.0 for existing in swatch_rgbs):
+    total_obj_count = max(sum(cnt for _, cnt in fg_dom_list), 1)
+    # Pass 1: pick prominent, clearly distinct object colors (>= 4% of object area, dist >= 36)
+    for candidate_rgb, cnt in fg_dom_list:
+        if cnt / total_obj_count < 0.04:
+            continue
+        if all(_rgb_distance(candidate_rgb, existing) >= 36.0 for existing in swatch_rgbs):
             swatch_rgbs.append(candidate_rgb)
-        if len(swatch_rgbs) >= 3:
+        if len(swatch_rgbs) >= 4:
             break
-    for candidate_rgb, _ in fg_dom_list + bg_dom_list:
-        if len(swatch_rgbs) >= 3:
-            break
-        if candidate_rgb not in swatch_rgbs:
-            swatch_rgbs.append(candidate_rgb)
-    color_swatches = [_rgb_to_hex(c) for c in swatch_rgbs[:3]]
+    # Pass 2: relax distance slightly if gift is monochrome / 2-tone
+    if len(swatch_rgbs) < 3:
+        for candidate_rgb, _ in fg_dom_list + bg_dom_list[1:]:
+            if all(_rgb_distance(candidate_rgb, existing) >= 22.0 for existing in swatch_rgbs):
+                swatch_rgbs.append(candidate_rgb)
+            if len(swatch_rgbs) >= 3:
+                break
+    color_swatches = [_rgb_to_hex(c) for c in swatch_rgbs[:4]]
 
     # HSV conversion for backdrop & primary foreground
     bg_h, bg_s, bg_v = colorsys.rgb_to_hsv(bg_rgb[0] / 255.0, bg_rgb[1] / 255.0, bg_rgb[2] / 255.0)
@@ -713,24 +719,8 @@ def _heuristic_fallback_from_attributes(attributes: list[Any] | None = None) -> 
     elif harmony_bonus >= 9.0:
         score = 7.7
 
-    swatch_map = {
-        "black": "#14161D",
-        "gold": "#E5B94C",
-        "white_silver": "#DCE3EE",
-        "green": "#1D6B4F",
-        "purple": "#6B42C6",
-        "neon_blue": "#22C6F0",
-    }
+    # Never invent fake hardcoded colors when actual image pixels haven't been analyzed yet
     swatches: list[str] = []
-    for bucket in list(bg_buckets) + list(fg_buckets):
-        hx = swatch_map.get(bucket)
-        if hx and hx not in swatches:
-            swatches.append(hx)
-    for default_hex in ("#1A1E29", "#3B82F6", "#CBD5E1"):
-        if len(swatches) >= 3:
-            break
-        if default_hex not in swatches:
-            swatches.append(default_hex)
 
     visual_tag = _score_to_tag(score)
     comment = _build_vision_comment(
@@ -785,7 +775,7 @@ class VisualAnalyzer:
         while len(store) > limit:
             store.popitem(last=False)
 
-    async def _fetch_image_bytes(self, photo_url: str, timeout: float = 3.5) -> bytes | None:
+    async def _fetch_image_bytes(self, photo_url: str, timeout: float = 4.5) -> bytes | None:
         url = (photo_url or "").strip()
         if not url or not url.startswith("http"):
             return None
@@ -794,14 +784,21 @@ class VisualAnalyzer:
             self._image_bytes_cache.move_to_end(url)
             return cached
 
+        candidates = [url]
+        if ".large.jpg" in url:
+            candidates.append(url.replace(".large.jpg", ".medium.jpg"))
+        elif ".medium.jpg" in url:
+            candidates.append(url.replace(".medium.jpg", ".large.jpg"))
+
         client = self._get_client()
-        try:
-            resp = await client.get(url, timeout=timeout)
-            if resp.status_code == 200 and resp.content and len(resp.content) > 100:
-                self._cache_put(self._image_bytes_cache, url, resp.content, 250)
-                return resp.content
-        except Exception as exc:
-            logger.debug(f"Image fetch failed for {url}: {exc}")
+        for candidate in candidates:
+            try:
+                resp = await client.get(candidate, timeout=timeout)
+                if resp.status_code == 200 and resp.content and len(resp.content) > 100:
+                    self._cache_put(self._image_bytes_cache, url, resp.content, 250)
+                    return resp.content
+            except Exception as exc:
+                logger.debug(f"Image fetch failed for {candidate}: {exc}")
         return None
 
     async def analyze_image_pixels(

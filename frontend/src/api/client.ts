@@ -383,6 +383,23 @@ export const api = {
   inspectCollectionModel: (short_name: string, model_name: string) =>
     request<XRayResponse>(`/analytics/model-preview${toQuery({ short_name, model_name })}`),
 
+  getPixelColors: (params: {
+    photo_url: string;
+    model?: string;
+    backdrop?: string;
+    symbol?: string;
+  }) =>
+    request<{
+      ok: boolean;
+      color_swatches: string[];
+      visual_score?: number;
+      visual_tag?: string;
+      is_monochrome?: boolean;
+      harmony_label?: string | null;
+      ai_vision_comment?: string | null;
+      source?: string;
+    }>(`/analytics/pixel-colors${toQuery(params)}`),
+
   runVisionScore: (payload: VisionScorePayload) =>
     request<VisionScoreResponse>('/analytics/vision-score', {
       method: 'POST',

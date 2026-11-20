@@ -657,6 +657,30 @@ async def get_analytics_trends(
     }
 
 
+@app.get("/api/analytics/pixel-colors")
+async def get_analytics_pixel_colors(
+    photo_url: str = Query(..., min_length=8),
+    model: str = Query(default=""),
+    backdrop: str = Query(default=""),
+    symbol: str = Query(default=""),
+) -> dict[str, Any]:
+    """Fast real pixel color extraction & CV harmony analysis for any opened NFT card."""
+    attrs: list[dict[str, str]] = []
+    if model.strip():
+        attrs.append({"type": "model", "value": model.strip()})
+    if backdrop.strip():
+        attrs.append({"type": "backdrop", "value": backdrop.strip()})
+    if symbol.strip():
+        attrs.append({"type": "symbol", "value": symbol.strip()})
+
+    result = await visual_analyzer.analyze_image_pixels(photo_url.strip(), attrs, timeout=5.0)
+    return {
+        "ok": True,
+        "photo_url": photo_url.strip(),
+        **result,
+    }
+
+
 @app.post("/api/analytics/vision-score")
 async def post_analytics_vision_score(body: VisionScoreRequest) -> dict[str, Any]:
     """Run deep pixel CV + optional Gemini/OpenAI AI Vision evaluation on a listing."""
