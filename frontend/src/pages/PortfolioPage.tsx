@@ -3,9 +3,7 @@ import {
   Briefcase,
   ExternalLink,
   Eye,
-  Plus,
   Trash2,
-  X,
 } from 'lucide-react';
 import { api } from '../api/client';
 import type {
@@ -35,7 +33,6 @@ interface PortfolioPageProps {
 
 export const PortfolioPage: React.FC<PortfolioPageProps> = ({
   portfolio,
-  collections,
   tonUsd,
   loading,
   onSelectListing,
@@ -44,14 +41,6 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
 }) => {
   const [openingId, setOpeningId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
-
-  // Add Saved NFT Modal
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [savingNew, setSavingNew] = useState(false);
-  const [newCollection, setNewCollection] = useState(collections[0]?.short_name || 'eternalrose');
-  const [newNumber, setNewNumber] = useState('');
-  const [newBuyPrice, setNewBuyPrice] = useState('');
-  const [newMarket, setNewMarket] = useState('portals');
 
   const items = portfolio?.items || [];
   const totalValueTon = items.reduce(
@@ -71,7 +60,6 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
       const res = await api.runXRay(query);
       onSelectListing(res.item);
     } catch {
-      // Fallback preview so user can always open saved item cleanly
       onSelectListing({
         id: String(item.id),
         tg_id: item.tg_id,
@@ -123,89 +111,23 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
     }
   };
 
-  const handleAddNew = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const col = collections.find((c) => c.short_name === newCollection) || collections[0];
-    const num = Math.max(1, Number(newNumber) || 1);
-    const price = Number(newBuyPrice) || col?.floor_price || 10;
-    const colName = col?.name || newCollection;
-    const shortName = col?.short_name || newCollection;
-    const tgId = `${colName.replace(/[^A-Za-z0-9]/g, '')}-${num}`;
-
-    setSavingNew(true);
-    try {
-      let xrayListing: AnalyzedListing | undefined;
-      try {
-        const xr = await api.runXRay(`${colName} #${num}`);
-        xrayListing = xr.item;
-      } catch {
-        // optional enrichment
-      }
-
-      await api.addPortfolioItem({
-        tg_id: xrayListing?.tg_id || tgId,
-        collection_name: xrayListing?.collection_name || colName,
-        short_name: xrayListing?.short_name || shortName,
-        number: num,
-        photo_url:
-          xrayListing?.photo_url ||
-          `https://nft.fragment.com/gift/${shortName}-${num}.large.jpg`,
-        buy_price: price,
-        listed_price: xrayListing?.fair_value || price,
-        market: newMarket,
-        auto_undercut_enabled: false,
-        undercut_mode: 'notify',
-        min_price_guard: price,
-        undercut_step: 0.05,
-        status: 'holding',
-        listing: xrayListing || null,
-      });
-      setShowAddModal(false);
-      setNewNumber('');
-      setNewBuyPrice('');
-      await onReload();
-      onNotify('Збережено в портфель', `${colName} #${num}`, 'success');
-    } catch (err) {
-      onNotify('Помилка збереження', err instanceof Error ? err.message : '', 'error');
-    } finally {
-      setSavingNew(false);
-    }
-  };
-
   return (
     <div className="space-y-4 pb-4">
-      {/* Header Summary Card */}
-      <section className="rounded-3xl p-4 sm:p-5 bg-gradient-to-br from-[#0098EA] via-[#0086D6] to-[#0070B8] text-white shadow-lg shadow-[#0098EA]/20 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-        <div>
-          <p className="text-[11px] font-bold uppercase tracking-wider text-white/80">
-            Портфель · Збережені NFT
-          </p>
-          <div className="flex items-baseline gap-2.5 mt-1 tabular-nums">
-            <span className="font-display text-2xl sm:text-3xl font-extrabold">
-              {items.length} NFT
+      {/* Compact Header Summary Card */}
+      <section className="rounded-3xl p-4 sm:p-5 bg-gradient-to-br from-[#0098EA] via-[#0086D6] to-[#0070B8] text-white shadow-lg shadow-[#0098EA]/20">
+        <p className="text-[11px] font-bold uppercase tracking-wider text-white/80">
+          Портфель · Збережені NFT
+        </p>
+        <div className="flex items-baseline gap-2.5 mt-1 tabular-nums">
+          <span className="font-display text-2xl sm:text-3xl font-extrabold">
+            {items.length} NFT
+          </span>
+          {totalValueTon > 0 && (
+            <span className="text-sm font-bold text-white/85">
+              ≈ {formatTon(totalValueTon)} TON ({formatUsd(totalValueTon * tonUsd)})
             </span>
-            {totalValueTon > 0 && (
-              <span className="text-sm font-bold text-white/85">
-                ≈ {formatTon(totalValueTon)} TON ({formatUsd(totalValueTon * tonUsd)})
-              </span>
-            )}
-          </div>
-          <p className="text-[11.5px] text-white/80 mt-1">
-            Ваша особиста колекція цікавих NFT — зберігаються без сповіщень, натисніть на картку для повного перегляду
-          </p>
+          )}
         </div>
-
-        <button
-          type="button"
-          onClick={() => {
-            haptic('light');
-            setShowAddModal(true);
-          }}
-          className="h-10 px-4 rounded-xl bg-white/18 hover:bg-white/28 border border-white/30 text-white text-xs font-extrabold inline-flex items-center justify-center gap-1.5 backdrop-blur-sm cursor-pointer shrink-0 transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Додати NFT</span>
-        </button>
       </section>
 
       {/* Saved NFTs Grid */}
@@ -221,9 +143,6 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
             <Briefcase className="w-5 h-5 text-[#0098EA]" />
           </div>
           <p className="text-sm font-extrabold text-[#0B1120]">Портфель порожній</p>
-          <p className="text-xs text-[#64748B] mt-1 leading-relaxed">
-            Зберігайте сюди будь-які цікаві NFT зі Сканера, Аналітики чи Снайпера — вони лежатимуть тут без зайвих сповіщень, і ви зможете відкрити будь-який у повний екран у будь-який момент.
-          </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -339,96 +258,6 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
               </div>
             );
           })}
-        </div>
-      )}
-
-      {/* ADD SAVED NFT MODAL */}
-      {showAddModal && (
-        <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center md:p-6 bg-[#0B1120]/45 backdrop-blur-[2px] animate-fade-in">
-          <div className="absolute inset-0" onClick={() => setShowAddModal(false)} />
-          <form
-            onSubmit={handleAddNew}
-            className="relative z-10 w-full md:max-w-[460px] bg-white rounded-t-[28px] md:rounded-3xl p-4 sm:p-5 space-y-3 animate-sheet-up shadow-2xl border border-[#E2E8F0]"
-          >
-            <div className="flex items-center justify-between">
-              <h3 className="font-display text-base font-extrabold text-[#0B1120]">
-                Зберегти NFT в портфель
-              </h3>
-              <button
-                type="button"
-                onClick={() => setShowAddModal(false)}
-                className="w-8 h-8 rounded-full bg-[#F8FAFC] border border-[#E2E8F0] flex items-center justify-center text-[#334155] cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-2.5 text-xs">
-              <div>
-                <label className="block font-bold text-[#334155] mb-1">Колекція</label>
-                <select
-                  value={newCollection}
-                  onChange={(e) => setNewCollection(e.target.value)}
-                  className="w-full h-10 px-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold text-[#0B1120] focus:outline-none focus:border-[#0098EA]"
-                >
-                  {collections.map((c) => (
-                    <option key={c.short_name} value={c.short_name}>
-                      {c.name} (Флор {formatTon(c.floor_price)} TON)
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block font-bold text-[#334155] mb-1">Номер #</label>
-                  <input
-                    type="number"
-                    required
-                    min="1"
-                    value={newNumber}
-                    onChange={(e) => setNewNumber(e.target.value)}
-                    placeholder="18718"
-                    className="w-full h-10 px-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold tabular-nums focus:outline-none focus:border-[#0098EA]"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-[#334155] mb-1">Ціна (TON)</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={newBuyPrice}
-                    onChange={(e) => setNewBuyPrice(e.target.value)}
-                    placeholder="Флор авто"
-                    className="w-full h-10 px-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold tabular-nums focus:outline-none focus:border-[#0098EA]"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-bold text-[#334155] mb-1">Маркет</label>
-                <select
-                  value={newMarket}
-                  onChange={(e) => setNewMarket(e.target.value)}
-                  className="w-full h-10 px-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold text-[#0B1120] focus:outline-none focus:border-[#0098EA]"
-                >
-                  <option value="portals">Portals</option>
-                  <option value="getgems">Getgems</option>
-                  <option value="mrkt">MRKT</option>
-                  <option value="tonnel">Tonnel</option>
-                  <option value="fragment">Fragment</option>
-                </select>
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={savingNew}
-              className="w-full h-11 rounded-full ton-btn-primary text-white text-sm font-extrabold cursor-pointer disabled:opacity-60"
-            >
-              {savingNew ? 'Збереження...' : 'Зберегти в портфель'}
-            </button>
-          </form>
         </div>
       )}
     </div>
