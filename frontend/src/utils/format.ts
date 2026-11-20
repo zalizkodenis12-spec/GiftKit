@@ -111,3 +111,19 @@ export function haptic(style: 'light' | 'medium' | 'success' | 'warning' = 'ligh
     // ignore outside Telegram
   }
 }
+
+export function openExternalLink(url?: string | null): void {
+  if (!url) return;
+  try {
+    if (
+      (url.startsWith('https://t.me/') || url.startsWith('tg://')) &&
+      window.Telegram?.WebApp?.openTelegramLink
+    ) {
+      window.Telegram.WebApp.openTelegramLink(url);
+      return;
+    }
+  } catch {
+    // fallback to window.open
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
+}

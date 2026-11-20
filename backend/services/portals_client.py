@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import html
+import re
 import time
 from typing import Any
 
@@ -12,6 +14,17 @@ from loguru import logger
 from backend.config import runtime_config
 
 PORTALS_BASE_URL = "https://portal-market.com/api"
+
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def is_valid_uuid(val: Any) -> bool:
+    s = str(val or "").strip()
+    if not s or s.startswith(("xray-", "synth-", "floor-", "live-anchored-")):
+        return False
+    return bool(_UUID_RE.fullmatch(s))
 
 
 def to_float(val: Any, default: float = 0.0) -> float:
@@ -247,7 +260,7 @@ class PortalsClient:
                 if isinstance(cols_map, dict):
                     for s in batch:
                         raw_traits = cols_map.get(s) or {}
-                        parsed = self._normalize_filters(raw_traits)
+                        parsed = self._normalize_filters(raw_traits, short_name=s)
                         self._cache_set(f"filters:{s}", parsed, ttl=300.0)
                         result[s] = parsed
                 else:
@@ -257,8 +270,12 @@ class PortalsClient:
         return result
 
     @staticmethod
-    def _normalize_filters(raw: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    def _normalize_filters(
+        raw: dict[str, Any],
+        short_name: str = "",
+    ) -> dict[str, list[dict[str, Any]]]:
         out: dict[str, list[dict[str, Any]]] = {"models": [], "backdrops": [], "symbols": []}
+        clean_short = (short_name or "").strip().lower()
         for key in ("models", "backdrops", "symbols"):
             items = raw.get(key)
             if not isinstance(items, list):
@@ -268,17 +285,102 @@ class PortalsClient:
                 name = str(item.get("name") or "").strip()
                 if not name:
                     continue
+                rarity = round(
+                    to_float(item.get("rarity_per_mille") or item.get("rarityPermille"), 1.0),
+                    2,
+                )
+                photo_url = str(item.get("url") or "").strip() or (
+                    f"https://storage.portal-market.com/portals-market/gifts/{clean_short}/models/png/{re.sub(r'[^a-z0-9]', '', name.lower())}.png"
+                    if key == "models" and clean_short
+                    else ""
+                )
                 parsed_items.append(
                     {
                         "name": name,
-                        "rarity_percent": round(to_float(item.get("rarity_per_mille"), 1.0), 2),
+                        "rarity_percent": rarity,
                         "floor_price": round(to_float(item.get("floor_price"), 0.0), 2),
                         "supply": to_int(item.get("supply"), 0),
+                        "photo_url": photo_url,
                     }
                 )
             parsed_items.sort(key=lambda x: x["floor_price"], reverse=True)
             out[key] = parsed_items
         return out
+
+    async def scrape_telegram_nft_metadata(self, slug: str) -> dict[str, Any] | None:
+        """Scrape official https://t.me/nft/{slug} page for real Model, Backdrop, Symbol & Owner."""
+        clean_slug = (slug or "").strip().strip("/")
+        if not clean_slug or "-" not in clean_slug:
+            return None
+
+        cache_key = f"tg_nft_meta:{clean_slug.lower()}"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        url = f"https://t.me/nft/{clean_slug}"
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(4.5, connect=2.5),
+                headers={"User-Agent": "Mozilla/5.0 (compatible; GiftKitBot/1.2)"},
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get(url)
+                if resp.status_code != 200 or not resp.text:
+                    return None
+                page_html = resp.text
+        except Exception as exc:
+            logger.debug(f"scrape_telegram_nft_metadata({clean_slug}) error: {exc}")
+            return None
+
+        title_m = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', page_html, re.IGNORECASE)
+        image_m = re.search(r'<meta\s+property=["\']og:image["\']\s+content=["\']([^"\']+)["\']', page_html, re.IGNORECASE)
+
+        title = html.unescape(title_m.group(1)).strip() if title_m else clean_slug
+        photo_url = html.unescape(image_m.group(1)).strip() if image_m else ""
+
+        def _extract_row(header: str) -> tuple[str, float] | None:
+            pattern = (
+                rf"<th>\s*{header}\s*</th>\s*<td>\s*([^<]+?)\s*"
+                r"(?:<mark>\s*([\d.,]+)\s*%\s*</mark>)?\s*</td>"
+            )
+            m = re.search(pattern, page_html, re.IGNORECASE | re.DOTALL)
+            if not m:
+                return None
+            val = html.unescape(m.group(1)).strip()
+            rar = round(to_float(m.group(2), 1.5), 2) if m.group(2) else 1.5
+            return (val, rar) if val else None
+
+        model_row = _extract_row("Model")
+        backdrop_row = _extract_row("Backdrop")
+        symbol_row = _extract_row("Symbol")
+
+        if not model_row and not backdrop_row:
+            return None
+
+        attributes: list[dict[str, Any]] = []
+        if model_row:
+            attributes.append({"type": "model", "value": model_row[0], "rarity_per_mille": model_row[1]})
+        if backdrop_row:
+            attributes.append({"type": "backdrop", "value": backdrop_row[0], "rarity_per_mille": backdrop_row[1]})
+        if symbol_row:
+            attributes.append({"type": "symbol", "value": symbol_row[0], "rarity_per_mille": symbol_row[1]})
+
+        owner = ""
+        owner_m = re.search(r"<th>\s*Owner\s*</th>\s*<td>(.*?)</td>", page_html, re.IGNORECASE | re.DOTALL)
+        if owner_m:
+            owner_clean = re.sub(r"<[^>]+>", " ", owner_m.group(1))
+            owner = " ".join(html.unescape(owner_clean).split()).strip()
+
+        result = {
+            "tg_id": clean_slug,
+            "title": title,
+            "photo_url": photo_url,
+            "owner": owner,
+            "attributes": attributes,
+        }
+        self._cache_set(cache_key, result, ttl=300.0)
+        return result
 
     async def search_nfts(
         self,

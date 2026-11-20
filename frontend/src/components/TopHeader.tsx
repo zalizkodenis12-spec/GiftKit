@@ -6,11 +6,7 @@ import {
   Diamond,
   Download,
   Flame,
-  Search,
-  ShieldCheck,
   SlidersHorizontal,
-  User,
-  Zap,
 } from 'lucide-react';
 import type {
   BeforeInstallPromptEvent,
@@ -22,14 +18,14 @@ import { formatPercent, haptic } from '../utils/format';
 
 interface TopHeaderProps {
   overview: OverviewResponse | null;
-  userProfile: UserProfile | null;
+  userProfile?: UserProfile | null;
   wsConnected: boolean;
   activeTab: TabKey;
   undercutCount: number;
   onChangeTab: (tab: TabKey) => void;
-  onOpenXRay: () => void;
-  onOpenMarkets: () => void;
-  onOpenProfile: () => void;
+  onOpenXRay?: () => void;
+  onOpenMarkets?: () => void;
+  onOpenProfile?: () => void;
   onNotify: (
     title: string,
     message?: string,
@@ -67,19 +63,14 @@ function isStandaloneMode(): boolean {
 
 export const TopHeader: React.FC<TopHeaderProps> = ({
   overview,
-  userProfile,
   wsConnected,
   activeTab,
   undercutCount,
   onChangeTab,
-  onOpenXRay,
-  onOpenMarkets,
-  onOpenProfile,
   onNotify,
 }) => {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [installed, setInstalled] = useState<boolean>(() => isStandaloneMode());
-  const [avatarErr, setAvatarErr] = useState(false);
 
   useEffect(() => {
     const handleBeforeInstall = (e: Event) => {
@@ -136,7 +127,6 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
   const tonUsd = overview?.ton_usd ?? null;
   const tonChange = overview?.ton_change_24h ?? null;
   const isUp = (tonChange ?? 0) >= 0;
-  const isDryRun = overview?.dry_run ?? true;
   const isLiveConnected = wsConnected || Boolean(overview);
 
   return (
@@ -151,11 +141,11 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           }}
           className="flex items-center gap-2.5 min-w-0 text-left cursor-pointer shrink-0"
         >
-          <div className="relative flex items-center justify-center w-9 h-9 rounded-xl overflow-hidden bg-[#0098EA] shadow-sm shrink-0 border border-[#BAE3FC]">
+          <div className="relative flex items-center justify-center w-9 h-9 rounded-full overflow-hidden bg-[#0098EA] shadow-sm shrink-0 border border-[#BAE3FC]">
             <img
               src="/giftkit-logo.png"
               alt="GiftKit"
-              className="w-full h-full object-cover"
+              className="w-full h-full object-cover rounded-full"
               onError={(e) => {
                 (e.currentTarget as HTMLImageElement).style.display = 'none';
               }}
@@ -202,7 +192,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
         {/* Desktop Horizontal Navigation */}
         <nav
           aria-label="Основна навігація"
-          className="hidden lg:flex items-center gap-1 bg-[#F4F7FB] p-1 rounded-2xl border border-[#E2E8F0]"
+          className="hidden md:flex items-center gap-1 bg-[#F4F7FB] p-1 rounded-2xl border border-[#E2E8F0]"
         >
           {DESKTOP_TABS.map(({ key, label, icon: Icon }) => {
             const isActive = activeTab === key;
@@ -232,91 +222,19 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           })}
         </nav>
 
-        {/* Right Controls */}
+        {/* Right Controls — Install PWA Only */}
         <div className="flex items-center gap-1.5 shrink-0">
           {!installed && (
             <button
               type="button"
               onClick={handleInstallClick}
               title="Встановити GiftKit як додаток (PWA)"
-              className="flex items-center gap-1.5 h-8 px-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-bold transition-colors cursor-pointer border border-[#E2E8F0] hover:border-[#BAE3FC]"
+              className="flex items-center gap-1.5 h-8 px-3 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] text-[#0B1120] hover:text-[#0077C8] text-[11.5px] font-bold transition-colors cursor-pointer border border-[#E2E8F0] hover:border-[#BAE3FC]"
             >
               <Download className="w-3.5 h-3.5 text-[#0098EA]" />
-              <span className="hidden xs:inline sm:inline">Встановити</span>
+              <span>Встановити</span>
             </button>
           )}
-
-          <button
-            type="button"
-            onClick={onOpenXRay}
-            title="Швидкий X-Ray аналіз NFT"
-            className="flex items-center gap-1.5 h-8 px-2.5 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] text-[#0077C8] text-[11px] font-bold transition-colors cursor-pointer border border-[#BAE3FC]"
-          >
-            <Search className="w-3.5 h-3.5" />
-            <span>X-Ray</span>
-          </button>
-
-          {/* Telegram User Profile Pill */}
-          <button
-            type="button"
-            onClick={() => {
-              haptic('light');
-              onOpenProfile();
-            }}
-            title={
-              userProfile
-                ? `Telegram профіль: ${userProfile.first_name || ''} ${
-                    userProfile.username ? `(@${userProfile.username})` : ''
-                  } · ID ${userProfile.tg_user_id}`
-                : 'Профіль Telegram та Хмарна синхронізація'
-            }
-            className="flex items-center gap-1.5 h-8 pl-1 pr-2 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-bold transition-colors cursor-pointer border border-[#E2E8F0] hover:border-[#BAE3FC]"
-          >
-            {userProfile?.photo_url && !avatarErr ? (
-              <img
-                src={userProfile.photo_url}
-                alt={userProfile.first_name || userProfile.username || 'TG'}
-                onError={() => setAvatarErr(true)}
-                className="w-6 h-6 rounded-full object-cover border border-[#BAE3FC] shrink-0"
-              />
-            ) : (
-              <span className="w-6 h-6 rounded-full bg-[#0098EA] text-white text-[10px] font-extrabold flex items-center justify-center shrink-0">
-                {userProfile?.first_name
-                  ? userProfile.first_name.slice(0, 1).toUpperCase()
-                  : userProfile?.username
-                    ? userProfile.username.slice(0, 1).toUpperCase()
-                    : <User className="w-3.5 h-3.5" />}
-              </span>
-            )}
-            <span className="hidden sm:inline max-w-[92px] truncate">
-              {userProfile?.username
-                ? `@${userProfile.username}`
-                : userProfile?.first_name || 'Профіль'}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenMarkets}
-            title={isDryRun ? 'Безпечний DRY-RUN режим' : 'Бойовий LIVE режим'}
-            className={`flex items-center gap-1 h-8 px-2.5 rounded-xl text-[11px] font-bold border transition-colors cursor-pointer ${
-              isDryRun
-                ? 'bg-[#F8FAFC] text-[#0B1120] border-[#CBD5E1] hover:border-[#94A3B8]'
-                : 'bg-[#0098EA] text-white border-[#0098EA] hover:bg-[#0077C8]'
-            }`}
-          >
-            {isDryRun ? (
-              <>
-                <ShieldCheck className="w-3.5 h-3.5 text-[#0098EA]" />
-                <span>DRY</span>
-              </>
-            ) : (
-              <>
-                <Zap className="w-3.5 h-3.5 fill-current" />
-                <span>LIVE</span>
-              </>
-            )}
-          </button>
         </div>
       </div>
     </header>

@@ -1,23 +1,22 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Bot,
+  Camera,
   ChevronDown,
   ChevronUp,
-  Cloud,
-  ExternalLink,
   Eye,
   Globe,
   KeyRound,
-  Lock,
+  Pencil,
   Save,
   Send,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
-  UserCheck,
   Wallet,
+  X,
 } from 'lucide-react';
-import { api } from '../api/client';
+import { api, saveStoredUserProfile } from '../api/client';
 import type { AppSettings, OverviewResponse, UserProfile } from '../types/api';
 import { formatTon, getMarketMeta, haptic } from '../utils/format';
 
@@ -55,7 +54,9 @@ const MARKET_DEFINITIONS = [
     field: 'portals_init_data' as const,
     fieldLabel: 'Portals initData (опц. для автопокупки)',
     fee: '5%',
-    desc: 'Основний маркет Telegram Gifts з миттєвим API',
+    desc: 'Підключено автоматично без ключів (прямий парсинг усіх 124 колекцій, флорів, атрибутів та прямі переходи на лот)',
+    guide:
+      'Публічні флори, атрибути та прямі переходи на лот у @portals працюють автоматично без ключів. Для приватного автобая: відкрийте @portals у Telegram Web -> F12 -> скопіюйте tgWebAppData.',
   },
   {
     key: 'getgems',
@@ -63,33 +64,68 @@ const MARKET_DEFINITIONS = [
     field: 'getgems_api_key' as const,
     fieldLabel: 'Getgems API Key (GraphQL)',
     fee: '5%',
-    desc: 'Найбільший ончейн TON NFT маркетплейс',
+    desc: 'Публічні флори та статистика працюють автоматично без ключів',
+    guide:
+      'Публічні ончейн-флори та переходи на лоти Getgems працюють автоматично без ключів. Опціональний GraphQL ключ підвищує ліміт запитів.',
   },
   {
     key: 'mrkt',
     name: 'MRKT',
     field: 'mrkt_init_data' as const,
-    fieldLabel: 'MRKT Telegram initData',
+    fieldLabel: 'MRKT Telegram initData (tgWebAppData)',
     fee: '4%',
-    desc: 'Офчейн-маркет з високою ліквідністю оферів',
+    desc: 'Прямі переходи на лоти працюють автоматично; для приватного стакана додайте tgWebAppData',
+    guide:
+      'Як підключити приватний стакан @mrkt: відкрийте @mrkt у Telegram Web (web.telegram.org) -> натисніть F12 -> вкладка Network / Application -> скопіюйте рядок tgWebAppData (query_id=...&hash=...) і вставте нижче.',
   },
   {
     key: 'tonnel',
     name: 'Tonnel',
     field: 'tonnel_init_data' as const,
-    fieldLabel: 'Tonnel Network initData',
+    fieldLabel: 'Tonnel Network initData (tgWebAppData)',
     fee: '4%',
-    desc: 'Часті арбітражні розбіжності по флору',
+    desc: 'Прямі переходи на лоти працюють автоматично; для приватного стакана додайте tgWebAppData',
+    guide:
+      'Як підключити приватний стакан @tonnel_network_bot: відкрийте @tonnel_network_bot у Telegram Web (web.telegram.org) -> натисніть F12 -> вкладка Network / Application -> скопіюйте рядок tgWebAppData (query_id=...&hash=...) і вставте нижче.',
   },
   {
     key: 'fragment',
-    name: 'Fragment',
+    name: 'Fragment & Telegram NFT',
     field: null,
     fieldLabel: '',
     fee: '5%',
-    desc: 'Публічний моніторинг аукціонів та номерів',
+    desc: 'Підключено автоматично без ключів (прямий парсинг колекцій, номерів та прямі переходи t.me/nft/...)',
+    guide: '',
   },
 ];
+
+function resizeImageToDataUrl(file: File, maxSize = 256): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Не вдалося прочитати файл'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Некоректне зображення'));
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const scale = Math.min(1, maxSize / Math.max(img.width || 1, img.height || 1));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('Canvas недоступний'));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      };
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 export const MarketsPage: React.FC<MarketsPageProps> = ({
   overview,
@@ -103,75 +139,78 @@ export const MarketsPage: React.FC<MarketsPageProps> = ({
   const [saving, setSaving] = useState(false);
   const [testingTg, setTestingTg] = useState(false);
   const [expandedMarket, setExpandedMarket] = useState<string | null>(null);
-  const [linkingTg, setLinkingTg] = useState(false);
   const [avatarErr, setAvatarErr] = useState(false);
-  const pollTimerRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    return () => {
-      if (pollTimerRef.current !== null) {
-        window.clearInterval(pollTimerRef.current);
-      }
-    };
-  }, []);
+  // Slide-Up "Мій профіль" Bottom Sheet State
+  const [showProfileSheet, setShowProfileSheet] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editUsername, setEditUsername] = useState('');
+  const [editPhoto, setEditPhoto] = useState('');
+  const [savingProfile, setSavingProfile] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const handleLinkBrowserViaBot = async () => {
-    haptic('medium');
-    if (pollTimerRef.current !== null) {
-      window.clearInterval(pollTimerRef.current);
-      pollTimerRef.current = null;
-    }
-    setLinkingTg(true);
+  const openProfileSheet = () => {
+    haptic('light');
+    const currentName =
+      [userProfile?.first_name, userProfile?.last_name].filter(Boolean).join(' ') || 'Denis';
+    const currentUsername = userProfile?.username || 'absolutikdenchik';
+    setEditName(currentName);
+    setEditUsername(currentUsername.replace(/^@/, ''));
+    setEditPhoto(userProfile?.photo_url || '');
+    setShowProfileSheet(true);
+  };
+
+  const handlePickPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
     try {
-      const codeRes = await api.createLoginCode();
-      if (codeRes.bot_login_url) {
-        window.open(codeRes.bot_login_url, '_blank', 'noopener,noreferrer');
-      }
-      onNotify(
-        'Підтвердіть вхід у Telegram',
-        'Натисніть Start у @GiftKit_bot — синхронізація відбудеться автоматично',
-        'info',
-      );
-
-      let attempts = 0;
-      pollTimerRef.current = window.setInterval(async () => {
-        attempts += 1;
-        if (attempts > 30) {
-          if (pollTimerRef.current !== null) {
-            window.clearInterval(pollTimerRef.current);
-            pollTimerRef.current = null;
-          }
-          setLinkingTg(false);
-          return;
-        }
-        try {
-          const pollRes = await api.pollLoginCode(codeRes.nonce);
-          if (pollRes.ready && pollRes.user) {
-            if (pollTimerRef.current !== null) {
-              window.clearInterval(pollTimerRef.current);
-              pollTimerRef.current = null;
-            }
-            setLinkingTg(false);
-            onUserSynced(pollRes.user);
-            onNotify(
-              'Telegram акаунт синхронізовано!',
-              `${pollRes.user.first_name || ''} ${
-                pollRes.user.username ? `(@${pollRes.user.username})` : ''
-              } · правила та портфель завантажено`,
-              'success',
-            );
-          }
-        } catch {
-          // continue polling
-        }
-      }, 2000);
+      const dataUrl = await resizeImageToDataUrl(file, 256);
+      setEditPhoto(dataUrl);
+      setAvatarErr(false);
     } catch (err) {
-      setLinkingTg(false);
       onNotify(
-        'Не вдалося створити код прив’язки',
-        err instanceof Error ? err.message : '',
+        'Не вдалося обробити фото',
+        err instanceof Error ? err.message : 'Спробуйте інше зображення',
         'error',
       );
+    }
+  };
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    haptic('medium');
+    const cleanName = editName.trim() || 'Denis';
+    const cleanUser = editUsername.trim().replace(/^@/, '') || 'absolutikdenchik';
+    setSavingProfile(true);
+    try {
+      const res = await api.updateProfile({
+        first_name: cleanName,
+        username: cleanUser,
+        photo_url: editPhoto,
+      });
+      const updatedUser: UserProfile = res?.user || {
+        tg_user_id: userProfile?.tg_user_id || 'owner',
+        first_name: cleanName,
+        username: cleanUser,
+        photo_url: editPhoto,
+      };
+      saveStoredUserProfile(updatedUser);
+      onUserSynced(updatedUser);
+      setShowProfileSheet(false);
+      onNotify('Профіль збережено', `${cleanName} (@${cleanUser})`, 'success');
+    } catch {
+      const fallbackUser: UserProfile = {
+        tg_user_id: userProfile?.tg_user_id || 'owner',
+        first_name: cleanName,
+        username: cleanUser,
+        photo_url: editPhoto,
+      };
+      saveStoredUserProfile(fallbackUser);
+      onUserSynced(fallbackUser);
+      setShowProfileSheet(false);
+      onNotify('Профіль збережено', `${cleanName} (@${cleanUser})`, 'success');
+    } finally {
+      setSavingProfile(false);
     }
   };
 
@@ -293,82 +332,148 @@ export const MarketsPage: React.FC<MarketsPageProps> = ({
   const hasVisionKey = Boolean(
     settings.gemini_api_key?.trim() || settings.openai_api_key?.trim(),
   );
-  const displayUserId =
-    userProfile?.tg_user_id || settings.tg_admin_chat_id || 'TG Auth';
   const displayFullName =
     [userProfile?.first_name, userProfile?.last_name].filter(Boolean).join(' ') ||
-    'Власник GiftKit';
-  const displayUsername = userProfile?.username ? `@${userProfile.username}` : '@GiftKit_Owner';
-  const initials = (userProfile?.first_name || userProfile?.username || 'GK')
-    .slice(0, 2)
-    .toUpperCase();
+    'Denis';
+  const rawUsername = (userProfile?.username || 'absolutikdenchik').replace(/^@/, '');
+  const displayUsername = `@${rawUsername}`;
+  const initials = (displayFullName || rawUsername || 'GK').slice(0, 2).toUpperCase();
 
   return (
     <div className="space-y-4 pb-6">
-      {/* Telegram Profile & Cross-Device Cloud Sync Card */}
-      <section className="ton-card rounded-2xl p-4 sm:p-5 border-[#BAE3FC] bg-gradient-to-br from-white via-white to-[#F0F8FF] space-y-3.5">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
+      {/* Minimalist "Мій профіль" Block */}
+      <div className="space-y-1.5">
+        <h2 className="font-display text-[14px] font-extrabold text-[#0B1120] px-1">
+          Мій профіль
+        </h2>
+        <section className="ton-card rounded-2xl p-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3.5 min-w-0">
             {userProfile?.photo_url && !avatarErr ? (
               <img
                 src={userProfile.photo_url}
                 alt={displayFullName}
                 onError={() => setAvatarErr(true)}
-                className="w-12 h-12 rounded-2xl object-cover border-2 border-[#0098EA] shadow-xs shrink-0"
+                className="w-14 h-14 rounded-full object-cover border border-[#E2E8F0] shrink-0"
               />
             ) : (
-              <div className="w-12 h-12 rounded-2xl bg-[#0098EA] text-white font-display font-extrabold text-base flex items-center justify-center border-2 border-[#BAE3FC] shadow-xs shrink-0">
+              <div className="w-14 h-14 rounded-full bg-[#0098EA] text-white font-display font-extrabold text-lg flex items-center justify-center border border-[#E2E8F0] shrink-0">
                 {initials}
               </div>
             )}
 
             <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="font-display text-[15px] font-extrabold text-[#0B1120] truncate">
-                  Профіль Telegram та Хмарна Синхронізація
-                </h2>
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#0098EA] text-white text-[10px] font-extrabold">
-                  <Cloud className="w-3 h-3" />
-                  Хмарна синхронізація активна (ПК + Телефон)
-                </span>
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] text-[10px] font-extrabold">
-                  <Lock className="w-2.5 h-2.5" />
-                  Захищено HMAC-SHA256
-                </span>
-              </div>
-
-              <div className="flex items-center gap-2 flex-wrap mt-1 text-xs">
-                <span className="font-extrabold text-[#0B1120]">{displayFullName}</span>
-                <span className="text-[#0077C8] font-bold">{displayUsername}</span>
-                <span className="px-2 py-0.5 rounded-md bg-[#F4F7FB] border border-[#E2E8F0] font-mono text-[11px] font-bold text-[#334155] tabular-nums">
-                  ID: {displayUserId}
-                </span>
-              </div>
+              <p className="text-[17px] font-extrabold text-[#0B1120] leading-tight truncate">
+                {displayFullName}
+              </p>
+              <p className="text-[13.5px] font-semibold text-[#0B1120] mt-0.5 truncate">
+                {displayUsername}
+              </p>
             </div>
           </div>
 
           <button
             type="button"
-            disabled={linkingTg}
-            onClick={handleLinkBrowserViaBot}
-            className="ton-btn-primary h-10 px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-60"
+            onClick={openProfileSheet}
+            title="Редагувати профіль"
+            className="w-10 h-10 rounded-xl bg-[#F4F7FB] hover:bg-[#E8F5FE] border border-[#E2E8F0] flex items-center justify-center shrink-0 cursor-pointer transition-colors"
           >
-            <UserCheck className="w-4 h-4" />
-            <span>
-              {linkingTg
-                ? 'Очікуємо підтвердження в @GiftKit_bot...'
-                : 'Прив’язати цей браузер / PWA через @GiftKit_bot'}
-            </span>
-            <ExternalLink className="w-3.5 h-3.5" />
+            <Pencil className="w-4 h-4 text-[#0B1120]" />
           </button>
-        </div>
+        </section>
+      </div>
 
-        <p className="text-[11.5px] text-[#334155] leading-relaxed bg-[#F8FAFC] border border-[#E2E8F0] rounded-xl px-3 py-2">
-          Ваш акаунт жорстко прив&apos;язаний до вашого Telegram ID. Усі правила снайпера, активні
-          офери та портфель автоматично синхронізуються між телефоном та комп&apos;ютером. Доступ
-          сторонніх осіб заблоковано криптографічним підписом.
-        </p>
-      </section>
+      {/* Slide-Up Bottom Sheet ("Мій профіль") */}
+      {showProfileSheet && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-[#0B1120]/45 backdrop-blur-[2px] animate-fade-in">
+          <div className="absolute inset-0" onClick={() => setShowProfileSheet(false)} />
+          <form
+            onSubmit={handleSaveProfile}
+            className="relative z-10 w-full sm:max-w-[420px] bg-white rounded-t-[28px] sm:rounded-3xl p-5 space-y-4 animate-sheet-up shadow-2xl border border-[#E2E8F0]"
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between">
+              <h3 className="font-display text-[16px] font-extrabold text-[#0B1120]">
+                Мій профіль
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowProfileSheet(false)}
+                className="w-8 h-8 rounded-full bg-[#F8FAFC] hover:bg-[#E8F5FE] border border-[#E2E8F0] flex items-center justify-center text-[#0B1120] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Centered Circular Avatar Picker */}
+            <div className="text-center space-y-1.5">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handlePickPhoto}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="w-24 h-24 rounded-full overflow-hidden border-2 border-[#BAE3FC] mx-auto relative group cursor-pointer flex items-center justify-center bg-[#F4F7FB]"
+              >
+                {editPhoto ? (
+                  <img
+                    src={editPhoto}
+                    alt={editName || 'Avatar'}
+                    className="w-full h-full object-cover rounded-full"
+                  />
+                ) : (
+                  <span className="w-full h-full bg-[#0098EA] text-white font-display font-extrabold text-2xl flex items-center justify-center">
+                    {(editName || editUsername || 'GK').slice(0, 2).toUpperCase()}
+                  </span>
+                )}
+                <span className="absolute inset-0 bg-[#0B1120]/35 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                  <Camera className="w-6 h-6 text-white" />
+                </span>
+              </button>
+              <p
+                onClick={() => fileInputRef.current?.click()}
+                className="text-[11.5px] font-semibold text-[#0098EA] cursor-pointer"
+              >
+                Натисніть на фото, щоб змінити
+              </p>
+            </div>
+
+            {/* Row 1: Name */}
+            <div>
+              <input
+                type="text"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                placeholder="Ваше ім'я"
+                className="w-full h-11 px-3.5 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] text-[14px] font-bold text-[#0B1120] placeholder:text-[#64748B] focus:outline-none focus:border-[#0098EA]"
+              />
+            </div>
+
+            {/* Row 2: Username */}
+            <div>
+              <input
+                type="text"
+                value={editUsername}
+                onChange={(e) => setEditUsername(e.target.value)}
+                placeholder="Юзернейм"
+                className="w-full h-11 px-3.5 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] text-[14px] font-semibold text-[#0B1120] placeholder:text-[#64748B] focus:outline-none focus:border-[#0098EA]"
+              />
+            </div>
+
+            {/* Bottom Oval Save Button */}
+            <button
+              type="submit"
+              disabled={savingProfile}
+              className="w-full h-11 rounded-full ton-btn-primary text-white text-sm font-extrabold cursor-pointer disabled:opacity-60"
+            >
+              {savingProfile ? 'Збереження...' : 'Зберегти'}
+            </button>
+          </form>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
         {/* Left Column: Wallet + Markets Status */}
@@ -497,8 +602,13 @@ export const MarketsPage: React.FC<MarketsPageProps> = ({
                     </button>
 
                     {isOpen && m.field && (
-                      <div className="px-2.5 pb-2.5 pt-1.5 border-t border-[#E2E8F0] bg-white">
-                        <label className="text-[10.5px] font-bold text-[#334155] flex items-center gap-1 mb-1">
+                      <div className="px-2.5 pb-2.5 pt-1.5 border-t border-[#E2E8F0] bg-white space-y-1.5">
+                        {m.guide && (
+                          <p className="text-[10.5px] text-[#334155] bg-[#E8F5FE] border border-[#BAE3FC] rounded-lg px-2.5 py-1.5 leading-snug">
+                            {m.guide}
+                          </p>
+                        )}
+                        <label className="text-[10.5px] font-bold text-[#334155] flex items-center gap-1">
                           <KeyRound className="w-3 h-3 text-[#0098EA]" />
                           {m.fieldLabel}
                         </label>
@@ -508,7 +618,7 @@ export const MarketsPage: React.FC<MarketsPageProps> = ({
                           onChange={(e) =>
                             setSettings({ ...settings, [m.field]: e.target.value })
                           }
-                          placeholder="Вставте ключ або initData..."
+                          placeholder="Вставте ключ або tgWebAppData..."
                           className="w-full h-9 px-2.5 rounded-lg bg-[#F4F7FB] border border-[#E2E8F0] text-xs font-mono focus:outline-none focus:border-[#0098EA]"
                         />
                       </div>

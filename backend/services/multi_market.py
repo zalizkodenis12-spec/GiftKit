@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import urllib.parse
 from typing import Any
 
 import httpx
@@ -12,7 +13,7 @@ from loguru import logger
 from backend.config import runtime_config
 from backend.models import MarketPricePoint
 from backend.services.getgems_client import KNOWN_GIFT_COLLECTION_ADDRESSES, getgems_client
-from backend.services.portals_client import portals_client, to_float
+from backend.services.portals_client import is_valid_uuid, portals_client, to_float
 
 MARKET_FEES: dict[str, float] = {
     "portals": 5.0,
@@ -122,34 +123,48 @@ class MultiMarketAggregator:
         short_name: str,
         portals_floor: float,
         getgems_stats_map: dict[str, dict[str, Any]] | None = None,
+        *,
+        number: int = 0,
+        collection_name: str = "",
+        item_id: str = "",
+        col_id: str = "",
     ) -> list[MarketPricePoint]:
-        """Return cross-market floor prices with accurate is_live flags."""
+        """Return cross-market floor prices with accurate is_live flags and direct NFT deep-links."""
         short = short_name.strip().lower()
         base_floor = max(portals_floor, 0.5)
-        # Rotate simulated spread gently every 10 minutes so arbitrage radar stays lively but stable
         bucket = int(time.time() // 600)
 
         points: list[MarketPricePoint] = []
 
-        # 1. Portals (LIVE)
+        # 1. Portals (LIVE) — official Telegram Mini App deep-link format
+        if is_valid_uuid(item_id):
+            portals_url = f"https://t.me/portals_market_bot/market?startapp=gift_{item_id}"
+        elif is_valid_uuid(col_id):
+            portals_url = f"https://t.me/portals_market_bot/market?startapp=collection-{col_id}"
+        else:
+            portals_url = "https://t.me/portals_market_bot/market"
+
         points.append(
             MarketPricePoint(
                 market="portals",
                 floor_price=round(base_floor, 2),
                 fee_percent=MARKET_FEES["portals"],
                 is_live=portals_client.last_live_ok,
-                url=f"https://t.me/portals/market?startapp=collection_{short}",
+                url=portals_url,
             )
         )
 
         # 2. Getgems (LIVE if fetched via REST/GraphQL, otherwise live-anchored)
         gg_stat = (getgems_stats_map or {}).get(short)
         gg_addr = KNOWN_GIFT_COLLECTION_ADDRESSES.get(short, "")
-        gg_url = (
-            f"https://getgems.io/collection/{gg_addr}"
-            if gg_addr and "placeholder" not in gg_addr
-            else f"https://getgems.io/search?q={short}"
-        )
+        if number > 0 and gg_addr and "placeholder" not in gg_addr:
+            gg_url = f"https://getgems.io/collection/{gg_addr}?filter=%7B%22search%22%3A%22{number}%22%7D"
+        elif gg_addr and "placeholder" not in gg_addr:
+            gg_url = f"https://getgems.io/collection/{gg_addr}"
+        else:
+            query_text = f"{collection_name or short} {number if number > 0 else ''}".strip()
+            gg_url = f"https://getgems.io/search?q={urllib.parse.quote(query_text)}"
+
         if gg_stat and gg_stat.get("floor_price", 0) > 0:
             points.append(
                 MarketPricePoint(
@@ -173,6 +188,7 @@ class MultiMarketAggregator:
             )
 
         # 3. MRKT (LIVE if initData provided, else live-anchored with is_live=False)
+        mrkt_url = f"https://t.me/mrkt/app?startapp={short}_{number}" if number > 0 else "https://t.me/mrkt/app"
         mrkt_live = await self._try_mrkt_live_floor(short)
         if mrkt_live and mrkt_live > 0:
             points.append(
@@ -181,7 +197,7 @@ class MultiMarketAggregator:
                     floor_price=round(mrkt_live, 2),
                     fee_percent=MARKET_FEES["mrkt"],
                     is_live=True,
-                    url=f"https://t.me/mrkt/app?startapp={short}",
+                    url=mrkt_url,
                 )
             )
         else:
@@ -192,11 +208,16 @@ class MultiMarketAggregator:
                     floor_price=round(max(0.2, base_floor * (1.0 + spread + 0.015)), 2),
                     fee_percent=MARKET_FEES["mrkt"],
                     is_live=False,
-                    url=f"https://t.me/mrkt/app?startapp={short}",
+                    url=mrkt_url,
                 )
             )
 
         # 4. Tonnel (LIVE if initData provided, else live-anchored with is_live=False)
+        tonnel_url = (
+            f"https://t.me/tonnel_network_bot/gift?startapp={short}_{number}"
+            if number > 0
+            else "https://t.me/tonnel_network_bot/gift"
+        )
         tonnel_live = await self._try_tonnel_live_floor(short)
         if tonnel_live and tonnel_live > 0:
             points.append(
@@ -205,7 +226,7 @@ class MultiMarketAggregator:
                     floor_price=round(tonnel_live, 2),
                     fee_percent=MARKET_FEES["tonnel"],
                     is_live=True,
-                    url=f"https://t.me/tonnel_network_bot/gifts?startapp={short}",
+                    url=tonnel_url,
                 )
             )
         else:
@@ -216,7 +237,7 @@ class MultiMarketAggregator:
                     floor_price=round(max(0.2, base_floor * (1.0 + spread - 0.02)), 2),
                     fee_percent=MARKET_FEES["tonnel"],
                     is_live=False,
-                    url=f"https://t.me/tonnel_network_bot/gifts?startapp={short}",
+                    url=tonnel_url,
                 )
             )
 

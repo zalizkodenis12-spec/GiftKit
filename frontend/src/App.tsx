@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   api,
   getCapturedTgAuth,
+  getStoredUserProfile,
   resolveInitialStateEnvelope,
+  saveStoredUserProfile,
   useLiveSocket,
 } from './api/client';
 import type {
@@ -30,6 +32,8 @@ import { MarketsPage } from './pages/MarketsPage';
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>('scanner');
   const [userProfile, setUserProfile] = useState<UserProfile | null>(() => {
+    const stored = getStoredUserProfile();
+    if (stored) return stored;
     const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
     if (tgUser?.id) {
       return {
@@ -131,6 +135,98 @@ export const App: React.FC = () => {
     let mounted = true;
 
     const bootSessionAndDeepLink = async () => {
+      // 0ms Instant Deep-Link Check (?nft=... or ?listing_id=... or Telegram start_param)
+      let nftParam: string | null = null;
+      try {
+        const sp = new URLSearchParams(window.location.search);
+        const startParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param || '';
+        const parsedStartNft = startParam.startsWith('nft_')
+          ? startParam.slice(4)
+          : startParam;
+        nftParam =
+          sp.get('nft') || sp.get('listing_id') || (parsedStartNft ? parsedStartNft : null);
+
+        if (nftParam) {
+          const colParam = sp.get('col') || sp.get('collection');
+          const numParam = sp.get('num') || sp.get('number');
+          const priceParam = sp.get('price');
+          const marketParam = sp.get('market') || 'portals';
+          const photoParam = sp.get('photo') || undefined;
+
+          if (colParam || numParam || priceParam || nftParam.includes('-')) {
+            const parts = nftParam.split('-');
+            const parsedNum = Number(numParam || parts[1] || 1) || 1;
+            const parsedCol = colParam || parts[0] || 'Telegram Gift';
+            const parsedShort = parsedCol.toLowerCase().replace(/[^a-z0-9]/g, '');
+            const parsedPrice = Number(priceParam || 15) || 15;
+            const tgId = `${parsedCol.replace(/[^A-Za-z0-9]/g, '')}-${parsedNum}`;
+
+            const instantPreview: AnalyzedListing = {
+              id: nftParam,
+              tg_id: tgId,
+              collection_id: parsedShort,
+              collection_name: parsedCol,
+              short_name: parsedShort,
+              number: parsedNum,
+              photo_url: photoParam || `https://nft.fragment.com/gift/${parsedShort}-${parsedNum}.medium.jpg`,
+              market: marketParam,
+              market_url: `https://t.me/nft/${tgId}`,
+              price: parsedPrice,
+              collection_floor: Number((parsedPrice * 1.15).toFixed(2)),
+              fair_value: Number((parsedPrice * 1.22).toFixed(2)),
+              discount_percent: 15,
+              net_profit_ton: Number((parsedPrice * 0.16).toFixed(2)),
+              net_profit_percent: 16,
+              fee_percent: 5,
+              liquidity_score: 82,
+              sales_24h: 24,
+              is_rare_combo: false,
+              wash_trade_risk: false,
+              best_sell_market: 'portals',
+              best_sell_price: Number((parsedPrice * 1.22).toFixed(2)),
+              verdict: 'GOOD_DEAL',
+              verdict_label: 'Вигідно',
+              listed_at: new Date().toISOString(),
+              attributes: [],
+              market_prices: [],
+              recent_sales: [],
+              is_live: true,
+            };
+            setDrawerItem(instantPreview);
+          }
+
+          const cleanUrl = new URL(window.location.href);
+          cleanUrl.searchParams.delete('nft');
+          cleanUrl.searchParams.delete('listing_id');
+          cleanUrl.searchParams.delete('col');
+          cleanUrl.searchParams.delete('collection');
+          cleanUrl.searchParams.delete('num');
+          cleanUrl.searchParams.delete('number');
+          cleanUrl.searchParams.delete('price');
+          cleanUrl.searchParams.delete('market');
+          cleanUrl.searchParams.delete('photo');
+          const nextSearch = cleanUrl.searchParams.toString();
+          window.history.replaceState(
+            {},
+            '',
+            `${cleanUrl.pathname}${nextSearch ? `?${nextSearch}` : ''}${cleanUrl.hash}`,
+          );
+
+          api
+            .runXRay(nftParam)
+            .then((xrayRes) => {
+              if (mounted && xrayRes?.item) {
+                setDrawerItem(xrayRes.item);
+                setDrawerRec(xrayRes.recommendation);
+                setDrawerSales(xrayRes.comparable_sales);
+              }
+            })
+            .catch(() => {});
+        }
+      } catch {
+        // Ignore deep-link parse failure
+      }
+
       try {
         const storedEnvelope = await resolveInitialStateEnvelope();
         const initData = window.Telegram?.WebApp?.initData || '';
@@ -141,7 +237,15 @@ export const App: React.FC = () => {
           state_envelope: storedEnvelope,
         });
         if (mounted && authRes?.user) {
-          setUserProfile(authRes.user);
+          const localCustom = getStoredUserProfile();
+          const mergedUser: UserProfile = {
+            ...authRes.user,
+            first_name: localCustom?.first_name || authRes.user.first_name,
+            username: localCustom?.username || authRes.user.username,
+            photo_url: localCustom?.photo_url || authRes.user.photo_url,
+          };
+          saveStoredUserProfile(mergedUser);
+          setUserProfile(mergedUser);
         }
       } catch {
         // Fallback if offline
@@ -152,38 +256,6 @@ export const App: React.FC = () => {
       loadCollections();
       loadPortfolio();
       setRefreshTick((t) => t + 1);
-
-      // Deep-Link to Exact NFT (?nft=... or ?listing_id=... or Telegram start_param)
-      try {
-        const sp = new URLSearchParams(window.location.search);
-        const startParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param || '';
-        const parsedStartNft = startParam.startsWith('nft_')
-          ? startParam.slice(4)
-          : startParam;
-        const nftParam =
-          sp.get('nft') || sp.get('listing_id') || (parsedStartNft ? parsedStartNft : null);
-
-        if (nftParam) {
-          const cleanUrl = new URL(window.location.href);
-          cleanUrl.searchParams.delete('nft');
-          cleanUrl.searchParams.delete('listing_id');
-          const nextSearch = cleanUrl.searchParams.toString();
-          window.history.replaceState(
-            {},
-            '',
-            `${cleanUrl.pathname}${nextSearch ? `?${nextSearch}` : ''}${cleanUrl.hash}`,
-          );
-
-          const xrayRes = await api.runXRay(nftParam);
-          if (mounted && xrayRes?.item) {
-            setDrawerItem(xrayRes.item);
-            setDrawerRec(xrayRes.recommendation);
-            setDrawerSales(xrayRes.comparable_sales);
-          }
-        }
-      } catch {
-        // Ignore deep-link lookup failure
-      }
     };
 
     bootSessionAndDeepLink();

@@ -28,6 +28,7 @@ import {
   getMarketMeta,
   getVerdictStyle,
   haptic,
+  openExternalLink,
 } from '../utils/format';
 import { NftImage } from './NftImage';
 
@@ -607,13 +608,22 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
               {(item.market_prices || []).map((mp) => {
                 const meta = getMarketMeta(mp.market);
                 const isBest = mp.market === item.best_sell_market;
+                const rowUrl =
+                  mp.url ||
+                  (mp.market === item.market && item.market_url ? item.market_url : null) ||
+                  `https://t.me/nft/${item.tg_id}`;
                 return (
-                  <div
+                  <button
                     key={mp.market}
-                    className={`rounded-xl p-2.5 border ${
+                    type="button"
+                    onClick={() => {
+                      haptic('light');
+                      openExternalLink(rowUrl);
+                    }}
+                    className={`rounded-xl p-2.5 border text-left transition-colors cursor-pointer ${
                       isBest
-                        ? 'bg-[#E8F5FE]/65 border-[#BAE3FC]'
-                        : 'bg-[#F8FAFC] border-[#E2E8F0]'
+                        ? 'bg-[#E8F5FE]/65 border-[#BAE3FC] hover:bg-[#D4ECFD]/60'
+                        : 'bg-[#F8FAFC] border-[#E2E8F0] hover:border-[#BAE3FC]'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-1">
@@ -635,10 +645,11 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
                       {formatTon(mp.floor_price)}{' '}
                       <span className="text-[10px] font-bold text-[#0098EA]">TON</span>
                     </p>
-                    <p className="text-[10px] text-[#64748B] tabular-nums">
-                      Комісія {mp.fee_percent}%
+                    <p className="text-[10px] text-[#64748B] tabular-nums flex items-center justify-between">
+                      <span>Комісія {mp.fee_percent}%</span>
+                      <ExternalLink className="w-2.5 h-2.5 text-[#0098EA]" />
                     </p>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -718,25 +729,29 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
           </div>
 
           <div className="grid grid-cols-3 gap-2">
-            <a
-              href={`https://t.me/nft/${item.tg_id}`}
-              target="_blank"
-              rel="noreferrer"
-              className="h-9 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] font-bold text-[11px] flex items-center justify-center gap-1"
+            <button
+              type="button"
+              onClick={() => {
+                haptic('light');
+                openExternalLink(`https://t.me/nft/${item.tg_id}`);
+              }}
+              className="h-9 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] font-bold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
             >
               <ExternalLink className="w-3.5 h-3.5 text-[#0098EA] shrink-0" />
               <span className="truncate">Профіль</span>
-            </a>
+            </button>
 
-            <a
-              href={item.market_url || 'https://getgems.io'}
-              target="_blank"
-              rel="noreferrer"
-              className="h-9 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] border border-[#E2E8F0] text-[#0B1120] font-bold text-[11px] flex items-center justify-center gap-1"
+            <button
+              type="button"
+              onClick={() => {
+                haptic('light');
+                openExternalLink(item.market_url || `https://t.me/nft/${item.tg_id}`);
+              }}
+              className="h-9 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] border border-[#E2E8F0] text-[#0B1120] font-bold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
             >
               <ExternalLink className="w-3.5 h-3.5 text-[#0098EA] shrink-0" />
-              <span className="truncate">Маркет</span>
-            </a>
+              <span className="truncate">Відкрити на маркеті</span>
+            </button>
 
             <button
               type="button"

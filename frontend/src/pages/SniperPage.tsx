@@ -24,7 +24,13 @@ import type {
   TestAlertResponse,
   UserOffer,
 } from '../types/api';
-import { formatTimeAgo, formatTon, getMarketMeta, haptic } from '../utils/format';
+import {
+  formatTimeAgo,
+  formatTon,
+  getMarketMeta,
+  haptic,
+  openExternalLink,
+} from '../utils/format';
 import { NftImage } from '../components/NftImage';
 
 interface SniperPageProps {
@@ -636,15 +642,17 @@ export const SniperPage: React.FC<SniperPageProps> = ({
                           <Zap className="w-3.5 h-3.5" />
                           <span>Перебити +0.1 TON</span>
                         </button>
-                        <a
-                          href={marketUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="h-9 px-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] border border-[#E2E8F0] hover:border-[#BAE3FC] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-bold inline-flex items-center gap-1 transition-colors"
+                        <button
+                          type="button"
+                          onClick={() => {
+                            haptic('light');
+                            openExternalLink(marketUrl);
+                          }}
+                          className="h-9 px-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] border border-[#E2E8F0] hover:border-[#BAE3FC] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-bold inline-flex items-center gap-1 transition-colors cursor-pointer"
                         >
                           <span>На маркет</span>
                           <ExternalLink className="w-3 h-3" />
-                        </a>
+                        </button>
                         <button
                           type="button"
                           onClick={() => handleDeleteOffer(offer)}
@@ -1029,26 +1037,30 @@ export const SniperPage: React.FC<SniperPageProps> = ({
                         >
                           <span>Відкрити NFT</span>
                         </button>
-                        <a
-                          href={marketUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          className="h-8 px-2.5 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-[11px] font-bold inline-flex items-center justify-center gap-1 transition-colors"
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            haptic('light');
+                            openExternalLink(marketUrl);
+                          }}
+                          className="h-8 px-2.5 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-[11px] font-bold inline-flex items-center justify-center gap-1 transition-colors cursor-pointer"
                         >
                           <span>На маркеті</span>
                           <ExternalLink className="w-3 h-3" />
-                        </a>
-                        <a
-                          href={tgNftUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          className="h-8 px-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] border border-[#E2E8F0] hover:border-[#BAE3FC] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-bold inline-flex items-center justify-center gap-1 transition-colors"
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            haptic('light');
+                            openExternalLink(tgNftUrl);
+                          }}
+                          className="h-8 px-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] border border-[#E2E8F0] hover:border-[#BAE3FC] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-bold inline-flex items-center justify-center gap-1 transition-colors cursor-pointer"
                         >
                           <span>Власник в ТГ</span>
                           <ExternalLink className="w-3 h-3" />
-                        </a>
+                        </button>
                       </div>
                     </div>
                   );
@@ -1343,20 +1355,24 @@ export const SniperPage: React.FC<SniperPageProps> = ({
               {savingOffer ? 'Розміщення...' : 'Поставити офер'}
             </button>
 
-            <a
-              href={getMarketCollectionUrl(
-                offerMarket,
-                offerTarget.collection_short_name || offerTarget.short_name,
-                offerTarget.collection_name,
-                offerTarget.market_url,
-              )}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="w-full h-10 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-xs font-extrabold inline-flex items-center justify-center gap-1.5 transition-colors"
+            <button
+              type="button"
+              onClick={() => {
+                haptic('light');
+                openExternalLink(
+                  getMarketCollectionUrl(
+                    offerMarket,
+                    offerTarget.collection_short_name || offerTarget.short_name,
+                    offerTarget.collection_name,
+                    offerTarget.market_url,
+                  ),
+                );
+              }}
+              className="w-full h-10 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-xs font-extrabold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
             >
               <span>Відкрити колекцію на маркеті</span>
               <ExternalLink className="w-3.5 h-3.5" />
-            </a>
+            </button>
           </form>
         </div>
       )}

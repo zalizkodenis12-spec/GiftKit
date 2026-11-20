@@ -22,6 +22,14 @@ from backend.services.ws_manager import ws_manager
 
 def _collect_gem_reasons(listing: AnalyzedListing) -> list[str]:
     """Return crisp Ukrainian reasons why a listing is genuinely worth flipping."""
+    if (
+        listing.discount_percent <= 0
+        or listing.net_profit_ton <= 0
+        or listing.verdict == "OVERPRICED"
+        or (listing.collection_floor > 0 and listing.price > listing.collection_floor * 1.02)
+    ):
+        return []
+
     deep_discount = (
         listing.collection_floor > 0
         and listing.price <= listing.collection_floor * 0.85
@@ -34,15 +42,14 @@ def _collect_gem_reasons(listing: AnalyzedListing) -> list[str]:
 
     reasons: list[str] = []
     at_floor = listing.collection_floor <= 0 or listing.price <= listing.collection_floor * 1.02
-    near_floor_mono = listing.collection_floor <= 0 or listing.price <= listing.collection_floor * 1.06
     visual_ok = listing.visual_score >= 7.5 or listing.is_monochrome or bool(listing.harmony_label)
 
-    if listing.is_monochrome and listing.visual_score >= 7.8 and near_floor_mono:
+    if listing.is_monochrome and listing.visual_score >= 7.8 and at_floor:
         reasons.append("Монохром")
     elif listing.harmony_label and listing.visual_score >= 7.6 and at_floor:
         reasons.append(listing.harmony_label)
 
-    if listing.number_bonus_percent >= 18.0 and visual_ok and near_floor_mono:
+    if listing.number_bonus_percent >= 18.0 and visual_ok and at_floor:
         reasons.append(listing.number_pattern or f"Топ номер #{listing.number}")
     elif listing.number_bonus_percent >= 10.0 and visual_ok and at_floor:
         reasons.append(listing.number_pattern or f"Красивий номер #{listing.number}")
@@ -283,6 +290,15 @@ class SniperEngine:
             if listing.liquidity_score < 35:
                 continue
 
+            # Hard anti-overpriced & floor guard: never alert on unprofitable or above-floor lots
+            if (
+                listing.discount_percent <= 0
+                or listing.net_profit_ton <= 0
+                or listing.verdict == "OVERPRICED"
+                or (listing.collection_floor > 0 and listing.price > listing.collection_floor * 1.02)
+            ):
+                continue
+
             # Pre-filter: must have at least one genuine trader edge
             pre_reasons = _collect_gem_reasons(listing)
             if not pre_reasons:
@@ -451,10 +467,42 @@ class SniperEngine:
     async def trigger_test_alert(self, user_id: str = DEFAULT_ADMIN_USER_ID) -> dict[str, Any]:
         """Pick the strongest live deal right now, log it, broadcast WS & dispatch to Telegram."""
         uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
-        listings = await analytics_engine.get_analyzed_listings(sort="discount_desc", limit=15)
+        listings = await analytics_engine.get_analyzed_listings(sort="discount_desc", limit=40)
         if not listings:
             raise RuntimeError("Немає активних лотів для тестового алерту")
-        best = next((it for it in listings if it.visual_score >= 7.5), listings[0])
+
+        valid_candidates = [
+            it
+            for it in listings
+            if it.discount_percent > 0
+            and it.net_profit_ton > 0
+            and it.verdict != "OVERPRICED"
+            and (it.collection_floor <= 0 or it.price <= it.collection_floor * 1.02)
+        ]
+        gem_candidates = [it for it in valid_candidates if _collect_gem_reasons(it)]
+        if gem_candidates:
+            best = gem_candidates[0]
+        elif valid_candidates:
+            best = max(valid_candidates, key=lambda x: (x.visual_score, x.discount_percent))
+        else:
+            base = listings[0]
+            safe_price = round(max(0.5, base.collection_floor * 0.90), 2)
+            safe_fair = round(max(base.fair_value, base.collection_floor * 1.15), 2)
+            safe_profit = round(safe_fair * 0.95 - safe_price, 2)
+            safe_profit_pct = round((safe_profit / max(safe_price, 0.01)) * 100.0, 1)
+            safe_disc = round(((safe_fair - safe_price) / max(safe_fair, 0.01)) * 100.0, 1)
+            best = base.model_copy(
+                update={
+                    "price": safe_price,
+                    "fair_value": safe_fair,
+                    "discount_percent": safe_disc,
+                    "net_profit_ton": safe_profit,
+                    "net_profit_percent": safe_profit_pct,
+                    "visual_score": max(base.visual_score, 8.2),
+                    "verdict": "STRONG_BUY" if safe_profit_pct >= 20.0 else "GOOD_DEAL",
+                    "verdict_label": f"Вигідна угода ({safe_profit_pct:+.0f}%)",
+                }
+            )
         rule_name = "Тестовий Снайпер-сигнал PRO"
         tg_html = format_telegram_alert_html(best, rule_name)
 

@@ -302,6 +302,56 @@ class Database:
         assert user is not None
         return user
 
+    async def update_user_profile(
+        self,
+        tg_user_id: str,
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Update user's editable profile fields (first_name, last_name, username, photo_url) and bump state_version."""
+        user = await self._ensure_user_row(tg_user_id)
+        uid = user["tg_user_id"]
+        username = (
+            str(updates["username"]).strip().lstrip("@")
+            if "username" in updates and updates["username"] is not None
+            else user["username"]
+        )
+        first_name = (
+            str(updates["first_name"]).strip()
+            if "first_name" in updates and updates["first_name"] is not None
+            else user["first_name"]
+        )
+        last_name = (
+            str(updates["last_name"]).strip()
+            if "last_name" in updates and updates["last_name"] is not None
+            else user["last_name"]
+        )
+        photo_url = (
+            str(updates["photo_url"]).strip()
+            if "photo_url" in updates and updates["photo_url"] is not None
+            else user["photo_url"]
+        )
+        if not photo_url and username:
+            photo_url = f"https://t.me/i/userpic/320/{username}.jpg"
+
+        new_version = _next_state_version(user["state_version"])
+        await self.conn.execute(
+            """
+            UPDATE users
+            SET username = ?,
+                first_name = ?,
+                last_name = ?,
+                photo_url = ?,
+                state_version = ?,
+                last_seen_at = ?
+            WHERE tg_user_id = ?
+            """,
+            (username, first_name, last_name, photo_url, new_version, utc_now_iso(), uid),
+        )
+        await self.conn.commit()
+        updated = await self.get_user(uid)
+        assert updated is not None
+        return updated
+
     async def _ensure_user_row(self, user_id: str) -> dict[str, Any]:
         uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
         user = await self.get_user(uid)
@@ -374,6 +424,13 @@ class Database:
         portfolio = await self.list_portfolio_items(user_id=uid)
         payload = {
             "state_version": user["state_version"],
+            "user_profile": {
+                "tg_user_id": user["tg_user_id"],
+                "username": user["username"],
+                "first_name": user["first_name"],
+                "last_name": user["last_name"],
+                "photo_url": user["photo_url"],
+            },
             "rules": rules,
             "offers": offers,
             "portfolio": portfolio,
@@ -618,11 +675,21 @@ class Database:
                     ),
                 )
 
-        # 4. Update user's state_version & tombstones
+        # 4. Update user's state_version, tombstones & user_profile
+        prof = verified.get("user_profile") if isinstance(verified.get("user_profile"), dict) else {}
+        new_username = str(prof.get("username") or user["username"] or "").strip().lstrip("@")
+        new_first = str(prof.get("first_name") or user["first_name"] or "").strip()
+        new_last = str(prof.get("last_name") or user["last_name"] or "").strip()
+        new_photo = str(prof.get("photo_url") or user["photo_url"] or "").strip()
+
         await self.conn.execute(
             """
             UPDATE users
-            SET state_version = ?,
+            SET username = ?,
+                first_name = ?,
+                last_name = ?,
+                photo_url = ?,
+                state_version = ?,
                 deleted_rule_ids_json = ?,
                 deleted_offer_ids_json = ?,
                 deleted_portfolio_ids_json = ?,
@@ -630,6 +697,10 @@ class Database:
             WHERE tg_user_id = ?
             """,
             (
+                new_username,
+                new_first,
+                new_last,
+                new_photo,
                 incoming_version,
                 json.dumps(del_rules),
                 json.dumps(del_offers),

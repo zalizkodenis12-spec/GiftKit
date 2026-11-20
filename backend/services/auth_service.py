@@ -131,8 +131,10 @@ def create_signed_token(user_dict: dict[str, Any], ttl_seconds: int = 86400 * 30
     norm = normalize_user_dict(user_dict)
     if not norm["tg_user_id"]:
         raise ValueError("tg_user_id is required to create a signed token")
+    token_photo = norm["photo_url"] if len(norm["photo_url"]) <= 512 else ""
     payload = {
         **norm,
+        "photo_url": token_photo,
         "exp": int(time.time()) + int(ttl_seconds),
     }
     raw_bytes = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -187,8 +189,15 @@ def _canonicalize_state_payload(user_id: str, state_payload: dict[str, Any]) -> 
                 pass
         return sorted(res)
 
-    return {
-        "user_id": str(user_id).strip(),
+    uid = str(user_id).strip()
+    raw_prof = state_payload.get("user_profile")
+    if isinstance(raw_prof, dict):
+        user_profile = normalize_user_dict({**raw_prof, "tg_user_id": uid})
+    else:
+        user_profile = None
+
+    out: dict[str, Any] = {
+        "user_id": uid,
         "state_version": int(state_payload.get("state_version") or 1),
         "rules": list(state_payload.get("rules") or []),
         "offers": list(state_payload.get("offers") or []),
@@ -197,6 +206,9 @@ def _canonicalize_state_payload(user_id: str, state_payload: dict[str, Any]) -> 
         "deleted_offer_ids": _clean_int_list(state_payload.get("deleted_offer_ids")),
         "deleted_portfolio_ids": _clean_int_list(state_payload.get("deleted_portfolio_ids")),
     }
+    if user_profile is not None:
+        out["user_profile"] = user_profile
+    return out
 
 
 def sign_state_envelope(user_id: str, state_payload: dict[str, Any]) -> dict[str, Any]:

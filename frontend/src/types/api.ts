@@ -495,6 +495,8 @@ declare global {
         expand: () => void;
         close?: () => void;
         initData?: string;
+        openTelegramLink?: (url: string) => void;
+        openLink?: (url: string) => void;
         setHeaderColor?: (color: string) => void;
         setBackgroundColor?: (color: string) => void;
         HapticFeedback?: {

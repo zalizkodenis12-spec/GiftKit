@@ -252,7 +252,11 @@ async def get_request_user(request: Request) -> dict[str, Any]:
 
     if isinstance(parsed_state_env, dict):
         try:
-            await db.import_user_state(user["tg_user_id"], parsed_state_env)
+            imported = await db.import_user_state(user["tg_user_id"], parsed_state_env)
+            if imported:
+                refreshed = await db.get_user(user["tg_user_id"])
+                if refreshed:
+                    user = refreshed
         except Exception as exc:
             logger.debug(f"X-GiftKit-State import skipped: {exc}")
 
@@ -322,6 +326,10 @@ async def post_auth_session(
     if isinstance(incoming_envelope, dict):
         await db.import_user_state(uid, incoming_envelope)
 
+    refreshed_user = await db.get_user(uid)
+    if refreshed_user:
+        user = refreshed_user
+
     session_token = auth_service.create_signed_token(user)
     state_envelope = await db.export_user_state(uid)
 
@@ -345,6 +353,25 @@ async def get_auth_me(request: Request) -> dict[str, Any]:
         "authenticated": bool(user.get("authenticated")),
         "user": _public_user_fields(user),
         "state_envelope": state_envelope,
+    }
+
+
+@app.patch("/api/auth/profile")
+async def patch_auth_profile(
+    request: Request,
+    body: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    """Update authenticated user's display name, username, and avatar (URL or data:image base64)."""
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    updated = await db.update_user_profile(uid, body)
+    new_token = auth_service.create_signed_token(updated)
+    envelope = await db.export_user_state(uid)
+    return {
+        "ok": True,
+        "user": _public_user_fields(updated),
+        "session_token": new_token,
+        "state_envelope": envelope,
     }
 
 

@@ -8,9 +8,8 @@ import {
   Palette,
   Search,
   Sparkles,
-  TrendingDown,
-  TrendingUp,
   Waves,
+  X,
 } from 'lucide-react';
 import { api } from '../api/client';
 import type {
@@ -70,6 +69,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
   // X-Ray
   const [xrayQuery, setXrayQuery] = useState('');
   const [xrayLoading, setXrayLoading] = useState(false);
+  const [inspectedGift, setInspectedGift] = useState<AnalyzedListing | null>(null);
 
   // Chart & selected collection
   const [selectedShortName, setSelectedShortName] = useState<string>(
@@ -80,11 +80,10 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
   const [chartLoading, setChartLoading] = useState(true);
   const [traitTab, setTraitTab] = useState<'models' | 'backdrops' | 'symbols'>('models');
 
-  // Collections table & heatmap
+  // Collections table
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<SortKey>('volume_desc');
   const [collections, setCollections] = useState<CollectionSummary[]>(initialCollections);
-  const [heatmap, setHeatmap] = useState<CollectionSummary[]>(initialCollections.slice(0, 12));
   const [subTab, setSubTab] = useState<AnalyticsSubTab>('charts');
 
   // Whales
@@ -116,7 +115,6 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
       ]);
       const cols = colRes.collections || [];
       setCollections(cols);
-      setHeatmap(colRes.heatmap && colRes.heatmap.length > 0 ? colRes.heatmap : cols.slice(0, 12));
       setWhales(whaleRes.events || []);
 
       if (cols.length > 0 && !cols.some((c) => c.short_name === selectedShortName) && !search) {
@@ -192,6 +190,12 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
     setXrayLoading(true);
     try {
       const res = await api.runXRay(q);
+      if (res?.item) {
+        setInspectedGift(res.item);
+        if (res.item.short_name) {
+          setSelectedShortName(res.item.short_name);
+        }
+      }
       onXRayResult(res);
     } catch (err) {
       onNotify(
@@ -205,7 +209,29 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
   };
 
   const activeCol = chartData?.collection;
-  const activeTraits = chartData?.traits?.[traitTab] || [];
+  const rawActiveTraits = chartData?.traits?.[traitTab] || [];
+  const traitAttrType =
+    traitTab === 'models' ? 'model' : traitTab === 'backdrops' ? 'backdrop' : 'symbol';
+  const inspectedMatchingAttr =
+    inspectedGift && inspectedGift.short_name === selectedShortName
+      ? inspectedGift.attributes?.find((a) => a.type === traitAttrType) || null
+      : null;
+
+  const activeTraits = React.useMemo(() => {
+    if (!inspectedMatchingAttr) return rawActiveTraits;
+    const pinnedName = inspectedMatchingAttr.value.toLowerCase();
+    const existing = rawActiveTraits.find((t) => t.name.toLowerCase() === pinnedName);
+    const pinnedItem = existing || {
+      name: inspectedMatchingAttr.value,
+      rarity_percent: inspectedMatchingAttr.rarity_percent,
+      floor_price: inspectedMatchingAttr.trait_floor,
+      supply: inspectedMatchingAttr.supply ?? 120,
+    };
+    const rest = rawActiveTraits.filter((t) => t.name.toLowerCase() !== pinnedName);
+    return [pinnedItem, ...rest];
+  }, [rawActiveTraits, inspectedMatchingAttr]);
+
+  const collectionModels = chartData?.traits?.models || [];
   const depthList = chartData?.orderbook_depth || [];
   const maxDepthCount = Math.max(1, ...depthList.map((d) => d.count));
 
@@ -267,6 +293,60 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
               </button>
             ))}
           </div>
+
+          {inspectedGift && (
+            <div className="mt-2.5 p-2.5 rounded-xl bg-white border border-[#BAE3FC] flex items-center justify-between gap-2.5">
+              <div
+                onClick={() => onSelectListing(inspectedGift)}
+                className="flex items-center gap-2.5 min-w-0 flex-1 cursor-pointer"
+              >
+                <div className="w-11 h-11 rounded-xl overflow-hidden bg-[#F4F7FB] border border-[#E2E8F0] shrink-0">
+                  <NftImage
+                    src={inspectedGift.photo_url}
+                    alt={inspectedGift.collection_name}
+                    className="w-full h-full object-cover"
+                  />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-xs font-extrabold text-[#0B1120] truncate">
+                      {inspectedGift.collection_name} #{inspectedGift.number}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-[#0098EA] text-white text-[10px] font-extrabold tabular-nums">
+                      Fair: {formatTon(inspectedGift.fair_value)} TON
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-wrap text-[10.5px] text-[#334155] tabular-nums mt-0.5">
+                    {(inspectedGift.attributes || []).map((attr) => (
+                      <span
+                        key={`${attr.type}-${attr.value}`}
+                        className="px-1.5 py-0.5 rounded bg-[#E8F5FE] text-[#0077C8] font-bold"
+                      >
+                        {attr.value}: {formatTon(attr.trait_floor)} TON
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => onSelectListing(inspectedGift)}
+                  className="h-8 px-2.5 rounded-lg bg-[#E8F5FE] hover:bg-[#D4ECFD] text-[#0077C8] text-[10.5px] font-extrabold cursor-pointer"
+                >
+                  Деталі
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setInspectedGift(null)}
+                  className="w-8 h-8 rounded-lg bg-[#F8FAFC] hover:bg-[#E2E8F0] text-[#64748B] flex items-center justify-center cursor-pointer"
+                  title="Очистити"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Sub-navigation inside Analytics (4 clean tabs) */}
@@ -416,10 +496,10 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
               </div>
             )}
 
-            {/* Trait Floor Table */}
+            {/* Trait Floor Table — Internally Scrollable with All Models/Backdrops/Symbols */}
             {chartData && (
               <div className="pt-2 border-t border-[#F1F5F9]">
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
                   <h3 className="text-xs font-extrabold text-[#0B1120] flex items-center gap-1.5">
                     <Layers className="w-3.5 h-3.5 text-[#0098EA]" />
                     Флор по трейтах
@@ -427,9 +507,9 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                   <div className="flex gap-1 bg-[#F4F7FB] p-0.5 rounded-lg border border-[#E2E8F0]">
                     {(
                       [
-                        ['models', 'Моделі'],
-                        ['backdrops', 'Фони'],
-                        ['symbols', 'Символи'],
+                        ['models', `Моделі (${(chartData?.traits?.models || []).length})`],
+                        ['backdrops', `Фони (${(chartData?.traits?.backdrops || []).length})`],
+                        ['symbols', `Символи (${(chartData?.traits?.symbols || []).length})`],
                       ] as const
                     ).map(([key, label]) => (
                       <button
@@ -448,28 +528,43 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                   </div>
                 </div>
 
-                <div className="space-y-1.5">
-                  {activeTraits.slice(0, 5).map((t, idx) => (
-                    <div
-                      key={`${t.name}-${idx}`}
-                      className="flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-xs"
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="font-bold text-[#0B1120] truncate">{t.name}</span>
-                        <span className="px-1.5 py-0.5 rounded bg-[#E8F5FE] text-[#0077C8] text-[10px] font-bold tabular-nums">
-                          {t.rarity_percent.toFixed(1)}%
-                        </span>
+                <div className="max-h-[300px] overflow-y-auto pr-1 space-y-1.5">
+                  {activeTraits.map((t, idx) => {
+                    const isPinned =
+                      Boolean(inspectedMatchingAttr) &&
+                      idx === 0 &&
+                      t.name.toLowerCase() === inspectedMatchingAttr?.value.toLowerCase();
+                    return (
+                      <div
+                        key={`${t.name}-${idx}`}
+                        className={`flex items-center justify-between px-2.5 py-1.5 rounded-xl border text-xs ${
+                          isPinned
+                            ? 'bg-[#E8F5FE] border-[#0098EA]'
+                            : 'bg-[#F8FAFC] border-[#E2E8F0]'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="font-bold text-[#0B1120] truncate">{t.name}</span>
+                          <span className="px-1.5 py-0.5 rounded bg-[#E8F5FE] text-[#0077C8] text-[10px] font-bold tabular-nums shrink-0">
+                            {t.rarity_percent.toFixed(1)}%
+                          </span>
+                          {isPinned && inspectedGift && (
+                            <span className="px-1.5 py-0.5 rounded bg-[#0098EA] text-white text-[9.5px] font-extrabold shrink-0">
+                              Ваш NFT #{inspectedGift.number}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-right shrink-0 tabular-nums">
+                          <span className="font-extrabold text-[#0B1120]">
+                            {formatTon(t.floor_price)} TON
+                          </span>
+                          <span className="text-[10px] text-[#64748B] ml-1.5">
+                            ({t.supply} шт)
+                          </span>
+                        </div>
                       </div>
-                      <div className="text-right shrink-0 tabular-nums">
-                        <span className="font-extrabold text-[#0B1120]">
-                          {formatTon(t.floor_price)} TON
-                        </span>
-                        <span className="text-[10px] text-[#64748B] ml-1.5">
-                          ({t.supply} шт)
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -508,66 +603,105 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
             )}
           </section>
 
-          {/* Right Column: Market Heatmap + Compact Trends & Whales Summary */}
+          {/* Right Column: Collection Models Dark Grid + Scrollable 24h Trending Backdrops + Whales */}
           <div className="lg:col-span-5 space-y-4">
             <section className="ton-card rounded-2xl p-3.5 sm:p-4">
               <div className="flex items-center justify-between mb-2.5">
                 <h2 className="font-display text-[13.5px] font-extrabold text-[#0B1120] flex items-center gap-1.5">
                   <Activity className="w-4 h-4 text-[#0098EA]" />
-                  Теплова карта ринку (24г)
+                  Моделі колекції {activeCol ? `· ${activeCol.name}` : '(24г)'} (
+                  {collectionModels.length || collections.length})
                 </h2>
                 <span className="text-[10.5px] font-semibold text-[#64748B]">
-                  Натисніть для графіка
+                  Гортайте всередині блоку
                 </span>
               </div>
 
-              <div className="grid grid-cols-3 gap-1.5">
-                {heatmap.slice(0, 9).map((c) => {
-                  const pct = c.change_24h_percent;
-                  const tileStyle =
-                    pct >= 0
-                      ? 'bg-[#E8F5FE] border-[#BAE3FC] text-[#0077C8]'
-                      : 'bg-[#F8FAFC] border-[#CBD5E1] text-[#0B1120]';
-
-                  const isSelected = c.short_name === selectedShortName;
-
-                  return (
-                    <button
-                      key={c.short_name}
-                      type="button"
-                      onClick={() => {
-                        haptic('light');
-                        setSelectedShortName(c.short_name);
-                      }}
-                      className={`p-2 rounded-xl border text-left transition-all cursor-pointer ${tileStyle} ${
-                        isSelected ? 'ring-2 ring-[#0098EA]' : ''
-                      }`}
-                    >
-                      <p className="text-[11px] font-extrabold truncate">{c.name}</p>
-                      <p className="text-[12px] font-extrabold tabular-nums mt-0.5">
-                        {formatTon(c.floor_price, 1)} TON
-                      </p>
-                      <p className="text-[10.5px] font-bold tabular-nums flex items-center gap-0.5">
-                        {pct >= 0 ? (
-                          <TrendingUp className="w-3 h-3" />
-                        ) : (
-                          <TrendingDown className="w-3 h-3" />
-                        )}
-                        {formatPercent(pct)}
-                      </p>
-                    </button>
-                  );
-                })}
+              <div className="max-h-[320px] overflow-y-auto pr-1 grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {collectionModels.length > 0
+                  ? collectionModels.map((m, idx) => (
+                      <button
+                        key={`${m.name}-${idx}`}
+                        type="button"
+                        onClick={() => {
+                          haptic('light');
+                          handleRunXRay(activeCol?.name || selectedShortName);
+                        }}
+                        className="bg-[#0B1120] hover:bg-[#162032] border border-[#1E293B] rounded-xl p-2.5 text-left transition-colors cursor-pointer"
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <div className="w-8 h-8 rounded-lg bg-[#162032] border border-[#1E293B] overflow-hidden shrink-0">
+                            <NftImage
+                              src={
+                                activeCol?.photo_url ||
+                                `https://nft.fragment.com/gift/${selectedShortName}-${idx + 1}.medium.jpg`
+                              }
+                              alt={m.name}
+                              className="w-full h-full object-cover"
+                            />
+                          </div>
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#162032] text-[#38BDF8] tabular-nums">
+                            {m.rarity_percent.toFixed(1)}%
+                          </span>
+                        </div>
+                        <p className="text-[12px] font-extrabold text-white truncate mt-1.5">
+                          {m.name}
+                        </p>
+                        <div className="flex items-baseline justify-between gap-1 mt-0.5">
+                          <span className="text-[13px] font-extrabold text-[#0098EA] tabular-nums">
+                            {formatTon(m.floor_price, 1)} TON
+                          </span>
+                          <span className="text-[10px] text-[#94A3B8] tabular-nums">
+                            {m.supply} шт
+                          </span>
+                        </div>
+                      </button>
+                    ))
+                  : collections.map((c) => (
+                      <button
+                        key={c.short_name}
+                        type="button"
+                        onClick={() => {
+                          haptic('light');
+                          setSelectedShortName(c.short_name);
+                        }}
+                        className="bg-[#0B1120] hover:bg-[#162032] border border-[#1E293B] rounded-xl p-2.5 text-left transition-colors cursor-pointer"
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <div className="w-8 h-8 rounded-lg bg-[#162032] border border-[#1E293B] overflow-hidden shrink-0">
+                            <NftImage
+                              src={c.photo_url}
+                              alt={c.name}
+                              className="w-full h-full object-cover"
+                            />
+                          </div>
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#162032] text-[#38BDF8] tabular-nums">
+                            {formatPercent(c.change_24h_percent)}
+                          </span>
+                        </div>
+                        <p className="text-[12px] font-extrabold text-white truncate mt-1.5">
+                          {c.name}
+                        </p>
+                        <div className="flex items-baseline justify-between gap-1 mt-0.5">
+                          <span className="text-[13px] font-extrabold text-[#0098EA] tabular-nums">
+                            {formatTon(c.floor_price, 1)} TON
+                          </span>
+                          <span className="text-[10px] text-[#94A3B8] tabular-nums">
+                            {c.supply} шт
+                          </span>
+                        </div>
+                      </button>
+                    ))}
               </div>
             </section>
 
-            {/* Quick 24h Trending Backdrops Preview */}
+            {/* 24h Trending Backdrops — Fixed-Height Internally Scrollable */}
             {trendingBackdrops.length > 0 && (
               <section className="ton-card rounded-2xl p-3.5 sm:p-4">
                 <div className="flex items-center justify-between mb-2.5">
                   <h3 className="font-display text-[13px] font-extrabold text-[#0B1120] flex items-center gap-1.5">
                     <Flame className="w-4 h-4 text-[#0098EA]" />
-                    Топ фони за 24г
+                    Топ фони (Тренди 24г) ({trendingBackdrops.length})
                   </h3>
                   <button
                     type="button"
@@ -577,10 +711,10 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                     Всі тренди →
                   </button>
                 </div>
-                <div className="space-y-1.5">
-                  {trendingBackdrops.slice(0, 4).map((tb, idx) => {
+                <div className="max-h-[340px] overflow-y-auto pr-1 space-y-2">
+                  {trendingBackdrops.map((tb, idx) => {
                     const label = tb.name || tb.backdrop || 'Backdrop';
-                    const color = tb.color_hex || tb.hex || '#0098EA';
+                    const color = tb.swatch_hex || tb.color_hex || tb.hex || '#0098EA';
                     const boost = tb.fair_value_boost_percent ?? tb.boost_percent ?? 0;
                     return (
                       <div
@@ -685,7 +819,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                 Збираємо статистику премій по фонах за останні 24 години...
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="max-h-[340px] overflow-y-auto pr-1 space-y-2">
                 {trendingBackdrops.map((tb, idx) => {
                   const name = tb.name || tb.backdrop || 'Backdrop';
                   const swatch = tb.swatch_hex || tb.color_hex || tb.hex || '#0098EA';

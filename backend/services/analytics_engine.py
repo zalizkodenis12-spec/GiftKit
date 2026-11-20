@@ -29,6 +29,7 @@ from backend.services.multi_market import MARKET_FEES, multi_market
 from backend.services.portals_client import (
     collection_photo_url,
     gift_photo_url,
+    is_valid_uuid,
     portals_client,
     to_float,
     to_int,
@@ -293,7 +294,13 @@ class AnalyticsEngine:
                         liq = compute_liquidity_score(sales_24h, listed, day_vol)
                         wash = detect_wash_trade(day_vol, sales_24h, floor)
 
-                        mpoints = await multi_market.get_market_prices_for_collection(short, floor, gg_stats)
+                        mpoints = await multi_market.get_market_prices_for_collection(
+                            short,
+                            floor,
+                            gg_stats,
+                            collection_name=raw["name"],
+                            col_id=raw["id"],
+                        )
                         m_floors = multi_market.build_market_floors_dict(mpoints)
                         min_f = min(m_floors.values()) if m_floors else floor
                         max_f = max(m_floors.values()) if m_floors else floor
@@ -512,8 +519,20 @@ class AnalyticsEngine:
         fair_value = round(base_fair * total_multiplier, 2)
         fair_value = max(fair_value, round(collection_floor, 2))
 
-        # Cross-market prices & best sell venue
-        mpoints = await multi_market.get_market_prices_for_collection(short_name, collection_floor, gg_stats)
+        item_id = str(raw.get("id") or f"{short_name}-{number}")
+        effective_col_id = col.id if col else col_id
+        effective_tg_id = tg_id or f"{re.sub(r'[^A-Za-z0-9]', '', collection_name)}-{number}"
+
+        # Cross-market prices & best sell venue with exact NFT deep-links
+        mpoints = await multi_market.get_market_prices_for_collection(
+            short_name,
+            collection_floor,
+            gg_stats,
+            number=number,
+            collection_name=collection_name,
+            item_id=item_id,
+            col_id=effective_col_id,
+        )
         best_sell_market: MarketName = market
         best_sell_net = fair_value * (1.0 - MARKET_FEES[market] / 100.0)
         best_sell_price = fair_value
@@ -552,19 +571,28 @@ class AnalyticsEngine:
         if col and col.thin_floor_count <= 3 and col.thin_floor_gap_percent >= 10.0:
             thin_warning = f"До +{col.thin_floor_gap_percent:.0f}% залишилось {col.thin_floor_count} лот{'и' if col.thin_floor_count > 1 else ''}"
 
-        item_id = str(raw.get("id") or f"{short_name}-{number}")
         photo_url = gift_photo_url(short_name, number, raw.get("photo_url"))
-        market_url = (
-            f"https://portal-market.com/nft/{item_id}"
-            if market == "portals"
-            else (next((p.url for p in mpoints if p.market == market), f"https://t.me/nft/{tg_id or short_name}"))
-        )
+        if market == "portals":
+            if is_valid_uuid(item_id):
+                market_url = f"https://t.me/portals_market_bot/market?startapp=gift_{item_id}"
+            elif is_valid_uuid(effective_col_id):
+                market_url = f"https://t.me/portals_market_bot/market?startapp=collection-{effective_col_id}"
+            else:
+                market_url = f"https://t.me/nft/{effective_tg_id}"
+        elif market == "fragment":
+            market_url = (
+                f"https://nft.fragment.com/gift/{short_name}-{number}"
+                if number > 0
+                else f"https://nft.fragment.com/collection/{short_name}"
+            )
+        else:
+            market_url = next((p.url for p in mpoints if p.market == market), f"https://t.me/nft/{effective_tg_id}")
         listed_at = str(raw.get("listed_at") or utc_now_iso())
 
         return AnalyzedListing(
             id=item_id,
-            tg_id=tg_id or f"{collection_name.replace(' ', '')}-{number}",
-            collection_id=col.id if col else col_id,
+            tg_id=effective_tg_id,
+            collection_id=effective_col_id,
             collection_name=collection_name,
             short_name=short_name,
             number=number,
@@ -944,9 +972,9 @@ class AnalyticsEngine:
             "collection": col.model_dump(),
             "points": points,
             "traits": {
-                "models": traits.get("models", [])[:25],
-                "backdrops": traits.get("backdrops", [])[:25],
-                "symbols": traits.get("symbols", [])[:25],
+                "models": traits.get("models", []),
+                "backdrops": traits.get("backdrops", []),
+                "symbols": traits.get("symbols", []),
             },
             "orderbook_depth": thin_info.get("orderbook_depth", []),
         }
@@ -959,16 +987,18 @@ class AnalyticsEngine:
         col_by_short = {c.short_name: c for c in collections}
 
         # 1. Check UUID direct lookup on Portals
-        uuid_match = re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", raw_q)
         raw_nft: dict[str, Any] | None = None
-        if uuid_match:
+        if is_valid_uuid(raw_q):
             raw_nft = await portals_client.get_nft_by_id(raw_q)
 
         # 2. Parse Telegram link https://t.me/nft/EternalRose-18718 or "Eternal Rose #18718"
         parsed_short = ""
         parsed_number: int | None = None
+        explicit_slug = ""
         if not raw_nft:
             cleaned = re.sub(r"^https?://(t\.me|telegram\.me)/nft/", "", raw_q, flags=re.IGNORECASE).strip("/")
+            if re.fullmatch(r"[A-Za-z0-9]+-\d+", cleaned):
+                explicit_slug = cleaned
             m = re.match(r"^([A-Za-z0-9\s\-']+?)[\s#\-]+(\d+)$", cleaned)
             if m:
                 parsed_short = re.sub(r"[^a-z0-9]", "", m.group(1).lower())
@@ -988,50 +1018,111 @@ class AnalyticsEngine:
                     None,
                 )
 
-            if col:
-                # Search live listings in this collection
+            if parsed_number is not None:
+                # Step A: Search Portals specifically for that exact serial number
+                exact_matches = await portals_client.search_nfts(
+                    limit=10,
+                    search=str(parsed_number),
+                    collection_ids=col.id if col else None,
+                )
+                raw_nft = next(
+                    (
+                        x
+                        for x in exact_matches
+                        if to_int(x.get("external_collection_number"), -1) == parsed_number
+                    ),
+                    None,
+                )
+
+                # Step B: If not listed on Portals right now, scrape official https://t.me/nft/{slug}
+                if not raw_nft:
+                    slug_candidates: list[str] = []
+                    if explicit_slug:
+                        slug_candidates.append(explicit_slug)
+                    if col:
+                        pascal_name = re.sub(r"[^A-Za-z0-9]", "", col.name)
+                        if pascal_name:
+                            slug_candidates.append(f"{pascal_name}-{parsed_number}")
+                        slug_candidates.append(f"{col.short_name}-{parsed_number}")
+                    elif parsed_short:
+                        slug_candidates.append(f"{parsed_short}-{parsed_number}")
+
+                    seen_slugs: set[str] = set()
+                    scraped_meta: dict[str, Any] | None = None
+                    for slug in slug_candidates:
+                        low_s = slug.lower()
+                        if low_s in seen_slugs:
+                            continue
+                        seen_slugs.add(low_s)
+                        scraped_meta = await portals_client.scrape_telegram_nft_metadata(slug)
+                        if scraped_meta:
+                            break
+
+                    if scraped_meta:
+                        if not col and scraped_meta.get("title"):
+                            title_base = scraped_meta["title"].split("#")[0].strip().lower()
+                            title_short = re.sub(r"[^a-z0-9]", "", title_base)
+                            col = col_by_short.get(title_short)
+                        c_short = col.short_name if col else (parsed_short or "eternalrose")
+                        c_name = col.name if col else (scraped_meta.get("title", "").split("#")[0].strip() or c_short.title())
+                        c_floor = col.floor_price if col else 10.0
+                        raw_nft = {
+                            "id": f"xray-{c_short}-{parsed_number}",
+                            "tg_id": scraped_meta.get("tg_id") or f"{re.sub(r'[^A-Za-z0-9]', '', c_name)}-{parsed_number}",
+                            "collection_id": col.id if col else "",
+                            "external_collection_number": parsed_number,
+                            "name": c_name,
+                            "photo_url": gift_photo_url(c_short, parsed_number, scraped_meta.get("photo_url")),
+                            "price": str(c_floor),
+                            "floor_price": str(c_floor),
+                            "attributes": scraped_meta.get("attributes") or [],
+                            "owner": scraped_meta.get("owner") or "",
+                            "listed_at": utc_now_iso(),
+                        }
+
+                # Step C: Final non-copied fallback if neither Portals nor t.me/nft responded
+                if not raw_nft and col:
+                    raw_nft = {
+                        "id": f"xray-{col.short_name}-{parsed_number}",
+                        "tg_id": explicit_slug or f"{re.sub(r'[^A-Za-z0-9]', '', col.name)}-{parsed_number}",
+                        "collection_id": col.id,
+                        "external_collection_number": parsed_number,
+                        "name": col.name,
+                        "photo_url": gift_photo_url(col.short_name, parsed_number),
+                        "price": str(col.floor_price),
+                        "floor_price": str(col.floor_price),
+                        "attributes": [],
+                        "listed_at": utc_now_iso(),
+                    }
+            elif col:
+                # Collection-only lookup (no #number specified): pick cheapest live listing in that collection
                 candidates = await portals_client.search_nfts(
-                    limit=35,
+                    limit=15,
                     sort="price_asc",
                     collection_ids=col.id,
                 )
-                if parsed_number is not None:
-                    raw_nft = next(
-                        (
-                            x
-                            for x in candidates
-                            if to_int(x.get("external_collection_number"), -1) == parsed_number
-                        ),
-                        None,
-                    )
-                if not raw_nft and candidates:
-                    # Use live listing as trait template if exact number isn't currently listed
-                    sample = dict(candidates[0])
-                    if parsed_number is not None:
-                        sample["external_collection_number"] = parsed_number
-                        sample["tg_id"] = f"{col.name.replace(' ', '')}-{parsed_number}"
-                        sample["photo_url"] = gift_photo_url(col.short_name, parsed_number)
-                    raw_nft = sample
-                elif not raw_nft:
-                    num = parsed_number or 1001
+                if candidates:
+                    raw_nft = dict(candidates[0])
+                else:
                     raw_nft = {
-                        "id": f"xray-{col.short_name}-{num}",
-                        "tg_id": f"{col.name.replace(' ', '')}-{num}",
+                        "id": f"xray-{col.short_name}-1",
+                        "tg_id": f"{re.sub(r'[^A-Za-z0-9]', '', col.name)}-1",
                         "collection_id": col.id,
-                        "external_collection_number": num,
+                        "external_collection_number": 1,
                         "name": col.name,
-                        "photo_url": gift_photo_url(col.short_name, num),
+                        "photo_url": gift_photo_url(col.short_name, 1),
                         "price": str(col.floor_price),
                         "floor_price": str(col.floor_price),
                         "attributes": [],
                         "listed_at": utc_now_iso(),
                     }
 
+        filters_map: dict[str, dict[str, list[dict[str, Any]]]] = {}
         if not raw_nft:
-            # Fallback to best current live listing
             listings = await self.get_analyzed_listings(limit=1)
             if listings:
                 item = listings[0]
+                filters_map = await portals_client.get_collection_filters([item.short_name])
             else:
                 raise ValueError("Не вдалося знайти NFT за цим запитом")
         else:
@@ -1074,6 +1165,7 @@ class AnalyticsEngine:
 
         return {
             "item": item.model_dump(),
+            "traits": filters_map.get(item.short_name) or {"models": [], "backdrops": [], "symbols": []},
             "comparable_sales": [s.model_dump() for s in comparable_sales],
             "recommendation": recommendation,
         }
@@ -1116,7 +1208,11 @@ class AnalyticsEngine:
                     number=num,
                     photo_url=gift_photo_url(col.short_name, num, col.photo_url),
                     market="portals",
-                    market_url=f"https://portal-market.com/collection/{col.short_name}",
+                    market_url=(
+                        f"https://t.me/portals_market_bot/market?startapp=collection-{col.id}"
+                        if is_valid_uuid(col.id)
+                        else f"https://t.me/nft/{col.name.replace(' ', '')}-{num}"
+                    ),
                     price=col.floor_price,
                     collection_floor=col.floor_price,
                     model_floor=col.floor_price,

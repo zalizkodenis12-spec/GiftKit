@@ -29,7 +29,28 @@ import type {
 const API_BASE = '/api';
 const SESSION_TOKEN_KEY = 'giftkit_session_token';
 const STATE_ENVELOPE_KEY = 'giftkit_state_envelope';
+const USER_PROFILE_KEY = 'giftkit_user_profile';
 const CLOUD_STATE_KEY = 'gk_state_v1';
+
+export function getStoredUserProfile(): UserProfile | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(USER_PROFILE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as UserProfile;
+  } catch {
+    return null;
+  }
+}
+
+export function saveStoredUserProfile(profile?: UserProfile | null): void {
+  if (!profile || typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(USER_PROFILE_KEY, JSON.stringify(profile));
+  } catch {
+    // ignore storage quota errors
+  }
+}
 
 let capturedUrlTgAuth: string | undefined;
 
@@ -237,6 +258,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if ('session_token' in resData && typeof resData.session_token === 'string') {
       saveSessionToken(resData.session_token);
     }
+    if ('user' in resData && resData.user && typeof resData.user === 'object') {
+      saveStoredUserProfile(resData.user as UserProfile);
+    }
   }
 
   return resData as T;
@@ -284,6 +308,21 @@ export const api = {
       session_token?: string;
       state_envelope?: unknown;
     }>(`/auth/poll-login?nonce=${encodeURIComponent(nonce)}`),
+
+  updateProfile: (payload: {
+    first_name: string;
+    username: string;
+    photo_url: string;
+  }) =>
+    request<{
+      ok: boolean;
+      user: UserProfile;
+      session_token?: string;
+      state_envelope?: unknown;
+    }>('/auth/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
 
   // 1. System & Overview
   getOverview: () => request<OverviewResponse>('/overview'),

@@ -117,9 +117,17 @@ class TelegramBotService:
             admin_tg_auth = tg_auth or self._get_admin_tg_auth()
             nft_slug = urllib.parse.quote(listing.tg_id or listing.id)
             lid_slug = urllib.parse.quote(listing.id)
+            col_slug = urllib.parse.quote(listing.collection_name)
+            short_slug = urllib.parse.quote(listing.short_name)
             deep_url = (
                 f"{url.rstrip('/')}/?nft={nft_slug}"
                 f"&listing_id={lid_slug}"
+                f"&col={col_slug}"
+                f"&short={short_slug}"
+                f"&num={listing.number}"
+                f"&price={listing.price}"
+                f"&floor={listing.collection_floor}"
+                f"&fair={listing.fair_value}"
                 f"&tg_auth={urllib.parse.quote(admin_tg_auth)}"
             )
             rows.append([InlineKeyboardButton(text="Відкрити в GiftKit", web_app=WebAppInfo(url=deep_url))])
