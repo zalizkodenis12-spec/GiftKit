@@ -120,6 +120,13 @@ class ArbitrageOpportunity(BaseModel):
     roi_percent: float
     liquidity_score: int
     type: Literal["instant_offer", "floor_spread"]
+    number: int = 0
+    tg_id: str = ""
+    listing_id: str = ""
+    model_name: str = ""
+    buy_url: str = ""
+    sell_url: str = ""
+    listing: dict[str, Any] | None = None
 
 
 class WhaleEvent(BaseModel):
@@ -204,6 +211,7 @@ class PortfolioCreate(BaseModel):
     min_price_guard: float | None = None
     undercut_step: float = Field(default=0.05, gt=0, le=50)
     status: Literal["listed", "holding", "sold"] = "listed"
+    listing: dict[str, Any] | None = None
 
 
 class PortfolioUpdate(BaseModel):

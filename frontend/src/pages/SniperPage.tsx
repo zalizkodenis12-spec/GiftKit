@@ -725,6 +725,11 @@ export const SniperPage: React.FC<SniperPageProps> = ({
                       <div className="min-w-0 flex-1">
                         <p className="text-[12.5px] font-extrabold text-[#0B1120] truncate">
                           {item.collection_name}
+                          {item.sample_listing?.number ? (
+                            <span className="text-[#64748B] font-bold">
+                              {' '}#{item.sample_listing.number}
+                            </span>
+                          ) : null}
                         </p>
                         <div className="flex items-center gap-1.5 text-[10.5px] text-[#64748B] tabular-nums mt-0.5 flex-wrap">
                           <span>Флор: {formatTon(item.floor_price)}</span>
@@ -1348,30 +1353,32 @@ export const SniperPage: React.FC<SniperPageProps> = ({
             </label>
 
             <button
-              type="submit"
-              disabled={savingOffer}
-              className="w-full ton-btn-primary h-11 rounded-xl font-bold text-sm cursor-pointer disabled:opacity-60"
+              type="button"
+              onClick={() => {
+                haptic('medium');
+                openExternalLink(
+                  offerTarget.sample_listing?.market_url ||
+                    offerTarget.market_url ||
+                    getMarketCollectionUrl(
+                      offerMarket,
+                      offerTarget.collection_short_name || offerTarget.short_name,
+                      offerTarget.collection_name,
+                      offerTarget.market_url,
+                    ),
+                );
+              }}
+              className="w-full ton-btn-primary h-11 rounded-xl font-bold text-sm inline-flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              {savingOffer ? 'Розміщення...' : 'Поставити офер'}
+              <span>Зробити реальний офер на маркеті</span>
+              <ExternalLink className="w-4 h-4" />
             </button>
 
             <button
-              type="button"
-              onClick={() => {
-                haptic('light');
-                openExternalLink(
-                  getMarketCollectionUrl(
-                    offerMarket,
-                    offerTarget.collection_short_name || offerTarget.short_name,
-                    offerTarget.collection_name,
-                    offerTarget.market_url,
-                  ),
-                );
-              }}
-              className="w-full h-10 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-xs font-extrabold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+              type="submit"
+              disabled={savingOffer}
+              className="w-full h-10 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-xs font-extrabold cursor-pointer disabled:opacity-60 transition-colors"
             >
-              <span>Відкрити колекцію на маркеті</span>
-              <ExternalLink className="w-3.5 h-3.5" />
+              {savingOffer ? 'Збереження...' : 'Зберегти офер у трекері GiftKit'}
             </button>
           </form>
         </div>

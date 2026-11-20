@@ -629,11 +629,26 @@ async def get_analytics_whales(limit: int = Query(default=12, ge=1, le=30)) -> d
     return {"events": [e.model_dump() for e in events]}
 
 
+@app.get("/api/analytics/model-preview")
+async def get_analytics_model_preview(
+    short_name: str = Query(..., min_length=1),
+    model_name: str = Query(..., min_length=1),
+) -> dict[str, Any]:
+    """Inspect a specific model of any collection (live listing if on sale, or real model PNG & floor)."""
+    try:
+        return await analytics_engine.inspect_collection_model(short_name=short_name, model_name=model_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/api/analytics/trends")
-async def get_analytics_trends(force_refresh: bool = Query(default=False)) -> dict[str, Any]:
-    """Return live 24h trending backdrops from Portals trait floors + top visual picks."""
+async def get_analytics_trends(
+    force_refresh: bool = Query(default=False),
+    collection: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Return all 80 official backdrops (or all backdrops of a chosen collection) + top visual picks."""
     trends, top_visual = await asyncio.gather(
-        trend_tracker.get_trends(force_refresh=force_refresh),
+        trend_tracker.get_trends(force_refresh=force_refresh, collection=collection),
         analytics_engine.get_analyzed_listings(sort="visual_desc", limit=10),
     )
     return {

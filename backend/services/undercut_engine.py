@@ -149,6 +149,7 @@ class UndercutEngine:
                     "pnl_ton": pnl_ton,
                     "pnl_percent": pnl_percent,
                     "last_undercut_at": row["last_undercut_at"],
+                    "listing": row.get("listing"),
                 }
             )
 
@@ -306,31 +307,8 @@ class UndercutEngine:
         return {"item": refreshed, "action_taken": "notify", "message": msg}
 
     async def check_all_once(self) -> None:
-        """Background check of all active listed holdings against live market floors."""
-        portfolio = await self.build_enriched_portfolio()
-        for item in portfolio["items"]:
-            if item["status"] != "listed" or not item["auto_undercut_enabled"]:
-                continue
-            if item["competitor_price"] >= item["listed_price"] - 0.009:
-                continue
-
-            dedup = f"{item['id']}:{item['competitor_price']}:{item['listed_price']}"
-            if dedup in self._notified_keys:
-                continue
-            self._notified_keys.add(dedup)
-
-            if item["undercut_mode"] == "auto" and not item["thin_floor_warning"]:
-                if item["listed_price"] > item["min_price_guard"]:
-                    await self.apply_undercut(item["id"], user_id=item.get("user_id"))
-                    continue
-
-            # Notify mode or thin floor protection triggered — update UI state silently without spamming Telegram
-            await db.update_portfolio_item(
-                item["id"],
-                {"is_undercut_by_competitor": True},
-                user_id=item.get("user_id"),
-            )
-            await ws_manager.broadcast("undercut_alert", {"action": "notify", "item": item})
+        """Portfolio items are saved quietly as a personal watchlist — zero background notifications."""
+        return
 
     async def _loop(self) -> None:
         await asyncio.sleep(10)

@@ -129,6 +129,7 @@ class Database:
                 competitor_override REAL DEFAULT NULL,
                 is_undercut_by_competitor INTEGER DEFAULT 0,
                 last_undercut_at TEXT DEFAULT NULL,
+                listing_json TEXT DEFAULT '',
                 created_at TEXT NOT NULL
             );
 
@@ -205,6 +206,10 @@ class Database:
             if "user_id" not in cols:
                 await self.conn.execute(
                     f"ALTER TABLE {tbl} ADD COLUMN user_id TEXT NOT NULL DEFAULT 'owner'"
+                )
+            if tbl == "portfolio_items" and "listing_json" not in cols:
+                await self.conn.execute(
+                    "ALTER TABLE portfolio_items ADD COLUMN listing_json TEXT DEFAULT ''"
                 )
 
         await self.conn.commit()
@@ -896,6 +901,14 @@ class Database:
 
     @staticmethod
     def _row_to_portfolio(row: aiosqlite.Row) -> dict[str, Any]:
+        listing_obj = None
+        if "listing_json" in row.keys() and row["listing_json"]:
+            try:
+                parsed = json.loads(row["listing_json"])
+                if isinstance(parsed, dict):
+                    listing_obj = parsed
+            except json.JSONDecodeError:
+                listing_obj = None
         return {
             "id": row["id"],
             "user_id": str(row["user_id"] if "user_id" in row.keys() else DEFAULT_ADMIN_USER_ID),
@@ -915,6 +928,7 @@ class Database:
             "competitor_override": float(row["competitor_override"]) if row["competitor_override"] is not None else None,
             "is_undercut_by_competitor": bool(row["is_undercut_by_competitor"]),
             "last_undercut_at": row["last_undercut_at"],
+            "listing": listing_obj,
             "created_at": row["created_at"],
         }
 
@@ -953,14 +967,16 @@ class Database:
         listed_price = round(float(data.get("listed_price") or round(buy_price * 1.18, 2)), 2)
         min_guard = round(float(data.get("min_price_guard") or round(buy_price * 1.06, 2)), 2)
         photo_url = data.get("photo_url") or f"https://nft.fragment.com/collection/{short_name}.webp"
+        listing_raw = data.get("listing")
+        listing_json = json.dumps(listing_raw, ensure_ascii=False) if isinstance(listing_raw, dict) else ""
         cur = await self.conn.execute(
             """
             INSERT INTO portfolio_items (
                 user_id, tg_id, collection_name, short_name, number, photo_url,
                 buy_price, listed_price, market, auto_undercut_enabled,
                 undercut_mode, min_price_guard, undercut_step, status,
-                competitor_override, is_undercut_by_competitor, last_undercut_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?)
+                competitor_override, is_undercut_by_competitor, last_undercut_at, listing_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?)
             """,
             (
                 uid,
@@ -972,11 +988,12 @@ class Database:
                 buy_price,
                 listed_price,
                 data.get("market", "portals"),
-                1 if data.get("auto_undercut_enabled", True) else 0,
+                0,
                 data.get("undercut_mode", "notify"),
                 min_guard,
                 float(data.get("undercut_step", 0.05)),
-                data.get("status", "listed"),
+                data.get("status", "holding"),
+                listing_json,
                 now,
             ),
         )

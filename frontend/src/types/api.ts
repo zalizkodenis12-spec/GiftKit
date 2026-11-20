@@ -84,6 +84,11 @@ export interface TrendingBackdrop {
   swatch_hex?: string;
   color_hex?: string;
   hex?: string;
+  center_hex?: string;
+  edge_hex?: string;
+  floor_price?: number;
+  rarity_percent?: number;
+  supply?: number;
   avg_premium_percent: number;
   collections_count?: number;
   collection_count?: number;
@@ -168,15 +173,22 @@ export interface ArbitrageOpportunity {
   id: string;
   collection_name: string;
   short_name: string;
+  number?: number;
+  tg_id?: string;
+  listing_id?: string;
+  model_name?: string;
   photo_url?: string;
   buy_market: MarketName | string;
   buy_price: number;
+  buy_url?: string;
   sell_market: MarketName | string;
   sell_price: number;
+  sell_url?: string;
   net_profit_ton: number;
   roi_percent: number;
   liquidity_score: number;
   type: 'instant_offer' | 'floor_spread' | string;
+  listing?: AnalyzedListing | null;
 }
 
 export interface ScannerListingsResponse {
@@ -206,6 +218,8 @@ export interface TraitFloorItem {
   rarity_percent: number;
   floor_price: number;
   supply: number;
+  photo_url?: string;
+  fallback_photo_url?: string;
 }
 
 export interface OrderbookLevel {
@@ -373,6 +387,7 @@ export interface PortfolioItem {
   buy_price: number;
   listed_price: number | null;
   market: MarketName | string;
+  market_url?: string;
   current_floor: number;
   competitor_price: number | null;
   fair_value: number;
@@ -390,6 +405,7 @@ export interface PortfolioItem {
   pnl_ton: number;
   pnl_percent: number;
   last_undercut_at?: string | null;
+  listing?: AnalyzedListing | null;
 }
 
 export interface PortfolioResponse {
@@ -406,11 +422,13 @@ export interface AddPortfolioPayload {
   buy_price: number;
   listed_price?: number | null;
   market: string;
+  market_url?: string;
   auto_undercut_enabled?: boolean;
   undercut_mode?: 'auto' | 'notify';
   min_price_guard?: number;
   undercut_step?: number;
   status?: 'listed' | 'holding' | 'sold';
+  listing?: AnalyzedListing | null;
 }
 
 export interface SettingsMarketStatus {
@@ -455,6 +473,7 @@ export interface TradeExecutePayload {
   photo_url?: string;
   fair_value?: number;
   collection_floor?: number;
+  listing?: AnalyzedListing | null;
 }
 
 export interface TradeExecuteResponse {

@@ -7,6 +7,7 @@ import hashlib
 import math
 import re
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -835,10 +836,11 @@ class AnalyticsEngine:
             short_f = collection.strip().lower()
             items = [i for i in items if i.short_name == short_f]
         if market and market != "all":
-            m_low = market.strip().lower()
-            # Filter listings on that market OR where that market is the best venue
-            direct = [i for i in items if i.market == m_low]
-            items = direct if direct else [i for i in items if i.best_sell_market == m_low]
+            wanted = {m.strip().lower() for m in market.split(",") if m.strip() and m.strip().lower() != "all"}
+            if wanted:
+                direct = [i for i in items if i.market.lower() in wanted]
+                secondary = [i for i in items if i.best_sell_market.lower() in wanted]
+                items = direct if direct else secondary
         if min_discount > -99.0:
             items = [i for i in items if i.discount_percent >= min_discount]
         if max_price is not None and max_price > 0:
@@ -867,48 +869,135 @@ class AnalyticsEngine:
         return items[:limit]
 
     async def get_arbitrage_opportunities(self, limit: int = 20) -> list[ArbitrageOpportunity]:
-        """Cross-market arbitrage finder comparing Portals, Getgems, MRKT, and Tonnel."""
-        collections = await self.get_collections_summary(sort="volume_desc", limit=60)
-        opportunities: list[ArbitrageOpportunity] = []
+        """Real specific-NFT cross-market arbitrage anchored strictly to live listed NFTs."""
+        collections, cached_listings, cheap_raw = await asyncio.gather(
+            self.get_collections_summary(sort="volume_desc", limit=120),
+            self.get_analyzed_listings(sort="profit_desc", limit=60),
+            portals_client.search_nfts(limit=40, sort="price_asc"),
+        )
+        col_by_id = {c.id: c for c in collections}
+        col_by_short = {c.short_name: c for c in collections}
 
-        for col in collections:
-            if col.floor_price < 1.5 or not col.market_floors:
+        # Combine cached listings + freshest cheapest live floor listings across collections
+        all_candidates: list[AnalyzedListing] = list(cached_listings)
+        existing_ids = {x.id for x in all_candidates}
+        extra_raw = [r for r in (cheap_raw or []) if str(r.get("id") or "") not in existing_ids]
+        if extra_raw:
+            short_names = list(
+                {
+                    col_by_id[str(r.get("collection_id") or "")].short_name
+                    for r in extra_raw
+                    if str(r.get("collection_id") or "") in col_by_id
+                }
+            )[:15]
+            f_map, gg_s = await asyncio.gather(
+                portals_client.get_collection_filters(short_names),
+                getgems_client.get_bulk_stats(short_names[:5]),
+            )
+            for raw in extra_raw:
+                analyzed = await self.analyze_raw_listing(raw, col_by_id, col_by_short, f_map, gg_s, market="portals")
+                if analyzed:
+                    all_candidates.append(analyzed)
+
+        # Fetch cheapest live NFT from top 6 diverse spread collections (throttled cleanly to avoid 429)
+        spread_cols = sorted(
+            [c for c in collections if c.floor_price >= 2.0 and c.arbitrage_spread_percent >= 3.0],
+            key=lambda c: c.arbitrage_spread_percent * (c.liquidity_score / 100.0),
+            reverse=True,
+        )[:6]
+        if spread_cols:
+            col_shorts = [c.short_name for c in spread_cols]
+            f_map2, gg_s2 = await asyncio.gather(
+                portals_client.get_collection_filters(col_shorts),
+                getgems_client.get_bulk_stats(col_shorts[:5]),
+            )
+            for idx_c, c in enumerate(spread_cols):
+                if idx_c > 0:
+                    await asyncio.sleep(0.18)
+                batch = await portals_client.search_nfts(limit=2, sort="price_asc", collection_ids=c.id)
+                for raw in (batch or [])[:1]:
+                    rid = str(raw.get("id") or "")
+                    if rid and rid not in existing_ids:
+                        existing_ids.add(rid)
+                        analyzed = await self.analyze_raw_listing(raw, col_by_id, col_by_short, f_map2, gg_s2, market="portals")
+                        if analyzed:
+                            all_candidates.append(analyzed)
+
+        opportunities: list[ArbitrageOpportunity] = []
+        per_col_count: dict[str, int] = {}
+        seen_ids: set[str] = set()
+
+        for item in all_candidates:
+            if not item.is_live or not is_valid_uuid(item.id) or item.price <= 0:
                 continue
-            floors = col.market_floors
-            buy_m = min(floors, key=lambda m: floors[m])
-            sell_m = max(floors, key=lambda m: floors[m])
-            if buy_m == sell_m:
+            if item.id in seen_ids:
                 continue
-            buy_p = floors[buy_m]
-            sell_p = floors[sell_m]
-            sell_fee = MARKET_FEES.get(sell_m, 5.0)
-            net_profit = round(sell_p * (1.0 - sell_fee / 100.0) - buy_p, 2)
+            if per_col_count.get(item.short_name, 0) >= 2:
+                continue
+
+            buy_m = item.market
+            buy_p = round(item.price, 2)
+
+            # Find best real cross-market sell venue (prefer different market when profitable)
+            best_sell_m = item.best_sell_market
+            best_sell_p = round(item.best_sell_price, 2)
+            best_sell_url = item.market_url
+
+            alt_candidates = [mp for mp in (item.market_prices or []) if mp.market != buy_m and mp.floor_price > 0]
+            if alt_candidates:
+                best_alt = max(
+                    alt_candidates,
+                    key=lambda mp: mp.floor_price * (1.0 - MARKET_FEES.get(mp.market, 5.0) / 100.0),
+                )
+                ratio = best_alt.floor_price / max(item.collection_floor, 0.01)
+                alt_sell_p = round(max(best_alt.floor_price, item.fair_value * min(1.18, ratio)), 2)
+                alt_fee = MARKET_FEES.get(best_alt.market, 5.0)
+                alt_net = round(alt_sell_p * (1.0 - alt_fee / 100.0) - buy_p, 2)
+                if alt_net > 0.1:
+                    best_sell_m = best_alt.market
+                    best_sell_p = alt_sell_p
+                    best_sell_url = best_alt.url
+
+            sell_fee = MARKET_FEES.get(best_sell_m, 5.0)
+            net_profit = round(best_sell_p * (1.0 - sell_fee / 100.0) - buy_p, 2)
             roi = round((net_profit / max(buy_p, 0.01)) * 100.0, 1)
 
-            if net_profit > 0.15 and roi >= 2.0:
-                opp_type = "instant_offer" if (col.best_offer > buy_p * 1.04) else "floor_spread"
-                opportunities.append(
-                    ArbitrageOpportunity(
-                        id=f"arb-{col.short_name}-{buy_m}-{sell_m}",
-                        collection_name=col.name,
-                        short_name=col.short_name,
-                        photo_url=col.photo_url,
-                        buy_market=buy_m,  # type: ignore[arg-type]
-                        buy_price=round(buy_p, 2),
-                        sell_market=sell_m,  # type: ignore[arg-type]
-                        sell_price=round(sell_p, 2),
-                        net_profit_ton=net_profit,
-                        roi_percent=roi,
-                        liquidity_score=col.liquidity_score,
-                        type=opp_type,  # type: ignore[arg-type]
-                    )
+            if net_profit <= 0.1 or roi < 1.5:
+                continue
+
+            model_attr = next((a.value for a in item.attributes if a.type == "model"), "")
+            seen_ids.add(item.id)
+            per_col_count[item.short_name] = per_col_count.get(item.short_name, 0) + 1
+
+            opportunities.append(
+                ArbitrageOpportunity(
+                    id=f"arb-{item.id}",
+                    collection_name=item.collection_name,
+                    short_name=item.short_name,
+                    photo_url=item.photo_url,
+                    buy_market=buy_m,  # type: ignore[arg-type]
+                    buy_price=buy_p,
+                    sell_market=best_sell_m,  # type: ignore[arg-type]
+                    sell_price=best_sell_p,
+                    net_profit_ton=net_profit,
+                    roi_percent=roi,
+                    liquidity_score=item.liquidity_score,
+                    type="floor_spread",
+                    number=item.number,
+                    tg_id=item.tg_id,
+                    listing_id=item.id,
+                    model_name=model_attr,
+                    buy_url=item.market_url,
+                    sell_url=best_sell_url,
+                    listing=item.model_dump(),
                 )
+            )
 
         opportunities.sort(key=lambda o: (o.roi_percent * (o.liquidity_score / 100.0)), reverse=True)
         return opportunities[:limit]
 
     async def get_collection_chart(self, short_name: str, timeframe: str = "7d") -> dict[str, Any]:
-        """Return historical chart points (DB snapshots + live-anchored history), trait floors & orderbook."""
+        """Return historical chart points (DB snapshots + live-anchored history), ALL trait floors & orderbook."""
         short = short_name.strip().lower()
         collections = await self.get_collections_summary(limit=250)
         col = next((c for c in collections if c.short_name == short), None)
@@ -916,12 +1005,24 @@ class AnalyticsEngine:
             col = collections[0]
             short = col.short_name
 
-        # Fetch real traits and real orderbook depth concurrently
-        filters_map, thin_info = await asyncio.gather(
-            portals_client.get_collection_filters([short]),
+        # Fetch real traits (with official cdn.changes.tg model PNGs), official backdrop hexes & orderbook depth
+        filters_map, thin_info, bg_catalog = await asyncio.gather(
+            portals_client.get_collection_filters([short], col_name_map={short: col.name}),
             self.inspect_thin_floor(col.id, short, col.floor_price),
+            portals_client.get_official_backdrops_catalog(),
         )
         traits = filters_map.get(short) or {"models": [], "backdrops": [], "symbols": []}
+
+        enriched_backdrops: list[dict[str, Any]] = []
+        for bg in traits.get("backdrops", []):
+            cat_entry = bg_catalog.get(str(bg.get("name") or "").strip().lower())
+            enriched_backdrops.append(
+                {
+                    **bg,
+                    "center_hex": cat_entry["center_hex"] if cat_entry else "",
+                    "edge_hex": cat_entry["edge_hex"] if cat_entry else "",
+                }
+            )
 
         now_ts = int(time.time())
         if timeframe == "24h":
@@ -973,10 +1074,136 @@ class AnalyticsEngine:
             "points": points,
             "traits": {
                 "models": traits.get("models", []),
-                "backdrops": traits.get("backdrops", []),
+                "backdrops": enriched_backdrops,
                 "symbols": traits.get("symbols", []),
             },
             "orderbook_depth": thin_info.get("orderbook_depth", []),
+        }
+
+    async def inspect_collection_model(self, short_name: str, model_name: str) -> dict[str, Any]:
+        """Inspect a specific model of a collection (live listing if on sale, OR exact real model PNG & floor)."""
+        short = short_name.strip().lower()
+        target_model = model_name.strip()
+        collections = await self.get_collections_summary(limit=250)
+        col_by_id = {c.id: c for c in collections}
+        col_by_short = {c.short_name: c for c in collections}
+        col = col_by_short.get(short)
+        if not col:
+            raise ValueError("Колекцію не знайдено")
+
+        filters_map, gg_stats, live_matches = await asyncio.gather(
+            portals_client.get_collection_filters([col.short_name], col_name_map={col.short_name: col.name}),
+            getgems_client.get_bulk_stats([col.short_name]),
+            portals_client.search_nfts(
+                limit=5,
+                sort="price_asc",
+                collection_ids=col.id,
+                filter_by_models=target_model,
+            ),
+        )
+        col_traits = filters_map.get(col.short_name) or {"models": [], "backdrops": [], "symbols": []}
+        model_entry = next(
+            (m for m in col_traits.get("models", []) if m["name"].lower() == target_model.lower()),
+            None,
+        )
+
+        item: AnalyzedListing | None = None
+        if live_matches:
+            # Verify the returned listing actually matches target_model
+            exact_live = next(
+                (
+                    raw for raw in live_matches
+                    if any(
+                        str(a.get("type") or "").lower() == "model"
+                        and str(a.get("value") or "").strip().lower() == target_model.lower()
+                        for a in (raw.get("attributes") or [])
+                    )
+                ),
+                None,
+            )
+            if exact_live:
+                analyzed = await self.analyze_raw_listing(exact_live, col_by_id, col_by_short, filters_map, gg_stats)
+                if analyzed:
+                    await self._enrich_listings_with_visuals([analyzed])
+                    item = analyzed
+
+        if item is None:
+            # Build exact real model preview (works even when 0 units are currently listed on Portals!)
+            m_name = model_entry["name"] if model_entry else target_model
+            m_floor = float(model_entry["floor_price"]) if model_entry and model_entry.get("floor_price", 0) > 0 else col.floor_price
+            m_rarity = float(model_entry["rarity_percent"]) if model_entry else 1.5
+            m_supply = int(model_entry["supply"]) if model_entry else 0
+            clean_m = re.sub(r"[^a-z0-9]", "", m_name.lower())
+            m_photo = (
+                (model_entry or {}).get("photo_url")
+                or f"https://cdn.changes.tg/gifts/models/{urllib.parse.quote(col.name)}/png/{urllib.parse.quote(m_name)}.png"
+            )
+            mpoints = await multi_market.get_market_prices_for_collection(
+                col.short_name,
+                m_floor,
+                gg_stats,
+                collection_name=col.name,
+                col_id=col.id,
+            )
+            market_url = (
+                f"https://t.me/portals_market_bot/market?startapp=collection-{col.id}"
+                if is_valid_uuid(col.id)
+                else f"https://nft.fragment.com/collection/{col.short_name}"
+            )
+            item = AnalyzedListing(
+                id=f"model-{col.short_name}-{clean_m}",
+                tg_id=f"{re.sub(r'[^A-Za-z0-9]', '', col.name)}-0",
+                collection_id=col.id,
+                collection_name=f"{col.name} · {m_name}",
+                short_name=col.short_name,
+                number=0,
+                photo_url=m_photo,
+                market="portals",
+                market_url=market_url,
+                price=round(m_floor, 2),
+                collection_floor=round(col.floor_price, 2),
+                model_floor=round(m_floor, 2),
+                backdrop_floor=round(col.floor_price, 2),
+                fair_value=round(m_floor, 2),
+                discount_percent=0.0,
+                net_profit_ton=0.0,
+                net_profit_percent=0.0,
+                fee_percent=5.0,
+                liquidity_score=col.liquidity_score,
+                sales_24h=col.sales_24h,
+                visual_score=7.5,
+                visual_tag="Модель колекції",
+                best_sell_market="portals",
+                best_sell_price=round(m_floor, 2),
+                verdict="FAIR",
+                verdict_label=f"Модель {m_name} · флор {round(m_floor, 2)} TON",
+                listed_at=utc_now_iso(),
+                attributes=[
+                    TraitAttribute(
+                        type="model",
+                        value=m_name,
+                        rarity_percent=m_rarity,
+                        trait_floor=round(m_floor, 2),
+                        supply=m_supply,
+                    )
+                ],
+                market_prices=mpoints,
+                recent_sales=generate_recent_sales(col.short_name, m_floor, col.sales_24h, 4),
+                is_live=True,
+            )
+
+        comparable_sales = generate_recent_sales(item.short_name, item.fair_value, item.sales_24h, 6)
+        m_attr = next((a for a in item.attributes if a.type == "model"), None)
+        rec = (
+            f"Модель {m_attr.value if m_attr else target_model} колекції {col.name}: "
+            f"рідкість {m_attr.rarity_percent if m_attr else 1.5}%, "
+            f"ринковий флор моделі {item.model_floor} TON (флор колекції {item.collection_floor} TON)."
+        )
+        return {
+            "item": item.model_dump(),
+            "traits": col_traits,
+            "comparable_sales": [s.model_dump() for s in comparable_sales],
+            "recommendation": rec,
         }
 
     async def xray_lookup(self, query: str) -> dict[str, Any]:
@@ -1171,105 +1398,56 @@ class AnalyticsEngine:
         }
 
     async def get_offer_radar(self, limit: int = 12) -> list[dict[str, Any]]:
-        """Bid-Ask Spread Radar showing best collections for profitable limit offers."""
-        collections, listings = await asyncio.gather(
-            self.get_collections_summary(sort="volume_desc", limit=45),
+        """Real live Offer Radar built strictly from real listed NFTs (zero synthetic stubs)."""
+        collections, newest_listings, cheap_listings = await asyncio.gather(
+            self.get_collections_summary(sort="volume_desc", limit=80),
+            self.get_analyzed_listings(sort="newest", limit=60),
             self.get_analyzed_listings(sort="price_asc", limit=60),
         )
-        listings_by_short: dict[str, AnalyzedListing] = {}
-        for item in listings:
-            if item.short_name not in listings_by_short or item.price < listings_by_short[item.short_name].price:
-                listings_by_short[item.short_name] = item
+        col_by_short = {c.short_name: c for c in collections}
+
+        # Pick freshest real live Portals NFT per collection (strictly real UUID, zero placeholders)
+        live_by_short: dict[str, AnalyzedListing] = {}
+        for item in newest_listings + cheap_listings:
+            if not item.is_live or not is_valid_uuid(item.id) or item.price <= 0:
+                continue
+            if item.short_name not in live_by_short:
+                live_by_short[item.short_name] = item
 
         radar: list[dict[str, Any]] = []
-        for idx, col in enumerate(collections):
-            if col.floor_price < 2.0:
+        for short_name, sample_listing in live_by_short.items():
+            col = col_by_short.get(short_name)
+            floor_p = col.floor_price if col and col.floor_price > 0 else sample_listing.collection_floor
+            if floor_p < 1.5:
                 continue
-            recommended_bid = round(col.best_offer + 0.1, 2)
-            net_flip = round(col.floor_price * 0.95 - recommended_bid, 2)
+            best_offer = col.best_offer if col else round(floor_p * 0.85, 2)
+            spread_pct = col.bid_ask_spread_percent if col else round(((floor_p - best_offer) / max(floor_p, 0.01)) * 100.0, 1)
+            recommended_bid = round(best_offer + 0.1, 2)
+            net_flip = round(floor_p * 0.95 - recommended_bid, 2)
             roi = round((net_flip / max(recommended_bid, 0.01)) * 100.0, 1)
-            if net_flip <= 0.2:
+            if net_flip <= 0.15:
                 continue
-
-            sample_listing = listings_by_short.get(col.short_name)
-            if sample_listing is None:
-                h = _seed_int(f"radar-sample:{col.short_name}")
-                num = 1000 + (h % 8500)
-                fair_val = round(col.floor_price * 1.12, 2)
-                sell_net = round(fair_val * 0.95 - col.floor_price, 2)
-                sell_pct = round((sell_net / max(col.floor_price, 0.01)) * 100.0, 1)
-                disc_pct = round(((fair_val - col.floor_price) / max(fair_val, 0.01)) * 100.0, 1)
-                sample_listing = AnalyzedListing(
-                    id=f"floor-{col.short_name}-{num}",
-                    tg_id=f"{col.name.replace(' ', '')}-{num}",
-                    collection_id=col.id,
-                    collection_name=col.name,
-                    short_name=col.short_name,
-                    number=num,
-                    photo_url=gift_photo_url(col.short_name, num, col.photo_url),
-                    market="portals",
-                    market_url=(
-                        f"https://t.me/portals_market_bot/market?startapp=collection-{col.id}"
-                        if is_valid_uuid(col.id)
-                        else f"https://t.me/nft/{col.name.replace(' ', '')}-{num}"
-                    ),
-                    price=col.floor_price,
-                    collection_floor=col.floor_price,
-                    model_floor=col.floor_price,
-                    backdrop_floor=col.floor_price,
-                    fair_value=fair_val,
-                    discount_percent=disc_pct,
-                    net_profit_ton=sell_net,
-                    net_profit_percent=sell_pct,
-                    fee_percent=5.0,
-                    liquidity_score=col.liquidity_score,
-                    sales_24h=col.sales_24h,
-                    best_sell_market="portals",
-                    best_sell_price=fair_val,
-                    verdict="GOOD_DEAL" if disc_pct >= 10.0 else "FAIR",
-                    verdict_label=f"Вигідна угода ({sell_pct:+.0f}%)" if disc_pct >= 10.0 else "Ринкова ціна",
-                    listed_at=utc_now_iso(),
-                    attributes=[
-                        TraitAttribute(
-                            type="model",
-                            value="Floor Model",
-                            rarity_percent=3.5,
-                            trait_floor=col.floor_price,
-                            supply=max(10, int(col.supply * 0.035)),
-                        ),
-                        TraitAttribute(
-                            type="backdrop",
-                            value="Standard Backdrop",
-                            rarity_percent=4.0,
-                            trait_floor=col.floor_price,
-                            supply=max(10, int(col.supply * 0.04)),
-                        ),
-                    ],
-                    recent_sales=generate_recent_sales(col.short_name, col.floor_price, col.sales_24h, 4),
-                    is_live=col.is_live,
-                )
 
             radar.append(
                 {
-                    "collection_short_name": col.short_name,
-                    "short_name": col.short_name,
-                    "collection_name": col.name,
-                    "photo_url": sample_listing.photo_url or col.photo_url,
-                    "floor_price": col.floor_price,
-                    "best_offer": col.best_offer,
+                    "collection_short_name": short_name,
+                    "short_name": short_name,
+                    "collection_name": sample_listing.collection_name,
+                    "photo_url": sample_listing.photo_url,
+                    "floor_price": round(floor_p, 2),
+                    "best_offer": round(best_offer, 2),
                     "suggested_offer": recommended_bid,
                     "recommended_bid": recommended_bid,
-                    "bid_ask_spread_percent": col.bid_ask_spread_percent,
+                    "bid_ask_spread_percent": round(spread_pct, 1),
                     "est_net_profit_ton": net_flip,
                     "est_roi_percent": roi,
-                    "liquidity_score": col.liquidity_score,
-                    "sales_24h": col.sales_24h,
-                    "market": "portals",
+                    "liquidity_score": sample_listing.liquidity_score,
+                    "sales_24h": sample_listing.sales_24h,
+                    "market": sample_listing.market,
                     "market_url": sample_listing.market_url,
                     "sample_listing": sample_listing.model_dump(),
                 }
             )
-            _ = idx
         radar.sort(key=lambda r: (r["bid_ask_spread_percent"] * (r["liquidity_score"] / 100.0)), reverse=True)
         return radar[:limit]
 

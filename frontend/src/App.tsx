@@ -403,16 +403,17 @@ export const App: React.FC = () => {
         buy_price: item.price,
         listed_price: Number((item.fair_value * 0.98).toFixed(2)),
         market: item.market,
-        auto_undercut_enabled: true,
+        auto_undercut_enabled: false,
         undercut_mode: 'notify',
         min_price_guard: Number((item.price * 1.05).toFixed(2)),
         undercut_step: 0.05,
-        status: 'listed',
+        status: 'holding',
+        listing: item,
       });
       await Promise.all([loadPortfolio(), loadOverview()]);
       notify(
-        'Додано в портфель',
-        `${item.collection_name} #${item.number} з Auto-Undercut`,
+        'Збережено в портфель',
+        `${item.collection_name} #${item.number} додано (без сповіщень)`,
         'success',
       );
       closeDrawer();
@@ -485,6 +486,7 @@ export const App: React.FC = () => {
             collections={collections}
             tonUsd={tonUsd}
             loading={portfolioLoading}
+            onSelectListing={openListingDrawer}
             onReload={async () => {
               await Promise.all([loadPortfolio(), loadOverview()]);
             }}

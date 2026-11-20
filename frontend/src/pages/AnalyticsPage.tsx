@@ -90,6 +90,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
   const [whales, setWhales] = useState<WhaleEvent[]>([]);
 
   // 24h Trends & Visual Top Picks
+  const [selectedBackdropCol, setSelectedBackdropCol] = useState<string>('');
   const [trendingBackdrops, setTrendingBackdrops] = useState<TrendingBackdrop[]>([]);
   const [topVisualFinds, setTopVisualFinds] = useState<AnalyzedListing[]>([]);
   const [trendsLoading, setTrendsLoading] = useState(true);
@@ -125,10 +126,10 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
     }
   }, [search, sort, selectedShortName]);
 
-  const fetchTrends = useCallback(async () => {
+  const fetchTrends = useCallback(async (colFilter?: string) => {
     setTrendsLoading(true);
     try {
-      const trendsRes = await api.getTrends().catch(() => null);
+      const trendsRes = await api.getTrends(colFilter || undefined).catch(() => null);
       if (trendsRes) {
         setTrendingBackdrops(trendsRes.trending_backdrops || []);
         const picks =
@@ -156,8 +157,8 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
   }, [fetchCollectionsAndWhales]);
 
   useEffect(() => {
-    fetchTrends();
-  }, [fetchTrends]);
+    fetchTrends(selectedBackdropCol);
+  }, [fetchTrends, selectedBackdropCol]);
 
   useEffect(() => {
     if (!selectedShortName) return;
@@ -203,6 +204,22 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
         err instanceof Error ? err.message : 'Спробуйте інший запит',
         'error',
       );
+    } finally {
+      setXrayLoading(false);
+    }
+  };
+
+  const handleInspectModel = async (shortName: string, modelName: string) => {
+    haptic('medium');
+    setXrayLoading(true);
+    try {
+      const res = await api.inspectCollectionModel(shortName, modelName);
+      if (res?.item) {
+        setInspectedGift(res.item);
+      }
+      onXRayResult(res);
+    } catch {
+      await handleRunXRay(`${activeCol?.name || shortName} ${modelName}`);
     } finally {
       setXrayLoading(false);
     }
@@ -603,60 +620,75 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
             )}
           </section>
 
-          {/* Right Column: Collection Models Dark Grid + Scrollable 24h Trending Backdrops + Whales */}
+          {/* Right Column: Collection Models on Pure White Cards + All 80 Backdrops + Whales */}
           <div className="lg:col-span-5 space-y-4">
             <section className="ton-card rounded-2xl p-3.5 sm:p-4">
               <div className="flex items-center justify-between mb-2.5">
                 <h2 className="font-display text-[13.5px] font-extrabold text-[#0B1120] flex items-center gap-1.5">
                   <Activity className="w-4 h-4 text-[#0098EA]" />
-                  Моделі колекції {activeCol ? `· ${activeCol.name}` : '(24г)'} (
+                  Моделі колекції {activeCol ? `· ${activeCol.name}` : ''} (
                   {collectionModels.length || collections.length})
                 </h2>
                 <span className="text-[10.5px] font-semibold text-[#64748B]">
-                  Гортайте всередині блоку
+                  Натисніть на модель
                 </span>
               </div>
 
-              <div className="max-h-[320px] overflow-y-auto pr-1 grid grid-cols-2 sm:grid-cols-3 gap-2">
+              <div className="max-h-[340px] overflow-y-auto pr-1 grid grid-cols-2 sm:grid-cols-3 gap-2">
                 {collectionModels.length > 0
-                  ? collectionModels.map((m, idx) => (
-                      <button
-                        key={`${m.name}-${idx}`}
-                        type="button"
-                        onClick={() => {
-                          haptic('light');
-                          handleRunXRay(activeCol?.name || selectedShortName);
-                        }}
-                        className="bg-[#0B1120] hover:bg-[#162032] border border-[#1E293B] rounded-xl p-2.5 text-left transition-colors cursor-pointer"
-                      >
-                        <div className="flex items-center justify-between gap-1.5">
-                          <div className="w-8 h-8 rounded-lg bg-[#162032] border border-[#1E293B] overflow-hidden shrink-0">
-                            <NftImage
-                              src={
-                                activeCol?.photo_url ||
-                                `https://nft.fragment.com/gift/${selectedShortName}-${idx + 1}.medium.jpg`
-                              }
-                              alt={m.name}
-                              className="w-full h-full object-cover"
-                            />
+                  ? collectionModels.map((m, idx) => {
+                      const primarySrc =
+                        m.photo_url ||
+                        m.fallback_photo_url ||
+                        activeCol?.photo_url ||
+                        `https://nft.fragment.com/gift/${selectedShortName}-${idx + 1}.medium.jpg`;
+                      return (
+                        <button
+                          key={`${m.name}-${idx}`}
+                          type="button"
+                          onClick={() =>
+                            handleInspectModel(activeCol?.short_name || selectedShortName, m.name)
+                          }
+                          className="bg-white hover:border-[#0098EA] border border-[#E2E8F0] rounded-xl p-2.5 text-left transition-colors cursor-pointer flex flex-col justify-between"
+                        >
+                          <div className="flex items-start justify-between gap-1.5">
+                            <div className="bg-white border border-[#F1F5F9] rounded-xl w-14 h-14 p-1 flex items-center justify-center shrink-0 overflow-hidden">
+                              <img
+                                src={primarySrc}
+                                alt={m.name}
+                                loading="lazy"
+                                onError={(e) => {
+                                  const img = e.currentTarget;
+                                  const step = img.dataset.fallbackStep || '0';
+                                  if (step === '0' && m.fallback_photo_url && img.src !== m.fallback_photo_url) {
+                                    img.dataset.fallbackStep = '1';
+                                    img.src = m.fallback_photo_url;
+                                  } else if (step !== '2' && activeCol?.photo_url && img.src !== activeCol.photo_url) {
+                                    img.dataset.fallbackStep = '2';
+                                    img.src = activeCol.photo_url;
+                                  }
+                                }}
+                                className="w-full h-full object-contain"
+                              />
+                            </div>
+                            <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] tabular-nums">
+                              {m.rarity_percent.toFixed(1)}%
+                            </span>
                           </div>
-                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#162032] text-[#38BDF8] tabular-nums">
-                            {m.rarity_percent.toFixed(1)}%
-                          </span>
-                        </div>
-                        <p className="text-[12px] font-extrabold text-white truncate mt-1.5">
-                          {m.name}
-                        </p>
-                        <div className="flex items-baseline justify-between gap-1 mt-0.5">
-                          <span className="text-[13px] font-extrabold text-[#0098EA] tabular-nums">
-                            {formatTon(m.floor_price, 1)} TON
-                          </span>
-                          <span className="text-[10px] text-[#94A3B8] tabular-nums">
-                            {m.supply} шт
-                          </span>
-                        </div>
-                      </button>
-                    ))
+                          <p className="text-[12px] font-extrabold text-[#0B1120] truncate mt-1.5">
+                            {m.name}
+                          </p>
+                          <div className="flex items-baseline justify-between gap-1 mt-0.5">
+                            <span className="text-[13px] font-extrabold text-[#0098EA] tabular-nums">
+                              {formatTon(m.floor_price, 1)} TON
+                            </span>
+                            <span className="text-[10px] font-semibold text-[#64748B] tabular-nums">
+                              {m.supply} шт
+                            </span>
+                          </div>
+                        </button>
+                      );
+                    })
                   : collections.map((c) => (
                       <button
                         key={c.short_name}
@@ -665,28 +697,28 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                           haptic('light');
                           setSelectedShortName(c.short_name);
                         }}
-                        className="bg-[#0B1120] hover:bg-[#162032] border border-[#1E293B] rounded-xl p-2.5 text-left transition-colors cursor-pointer"
+                        className="bg-white hover:border-[#0098EA] border border-[#E2E8F0] rounded-xl p-2.5 text-left transition-colors cursor-pointer"
                       >
-                        <div className="flex items-center justify-between gap-1.5">
-                          <div className="w-8 h-8 rounded-lg bg-[#162032] border border-[#1E293B] overflow-hidden shrink-0">
+                        <div className="flex items-start justify-between gap-1.5">
+                          <div className="bg-white border border-[#F1F5F9] rounded-xl w-14 h-14 p-1 flex items-center justify-center shrink-0 overflow-hidden">
                             <NftImage
                               src={c.photo_url}
                               alt={c.name}
-                              className="w-full h-full object-cover"
+                              className="w-full h-full object-contain"
                             />
                           </div>
-                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#162032] text-[#38BDF8] tabular-nums">
+                          <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] tabular-nums">
                             {formatPercent(c.change_24h_percent)}
                           </span>
                         </div>
-                        <p className="text-[12px] font-extrabold text-white truncate mt-1.5">
+                        <p className="text-[12px] font-extrabold text-[#0B1120] truncate mt-1.5">
                           {c.name}
                         </p>
                         <div className="flex items-baseline justify-between gap-1 mt-0.5">
                           <span className="text-[13px] font-extrabold text-[#0098EA] tabular-nums">
                             {formatTon(c.floor_price, 1)} TON
                           </span>
-                          <span className="text-[10px] text-[#94A3B8] tabular-nums">
+                          <span className="text-[10px] font-semibold text-[#64748B] tabular-nums">
                             {c.supply} шт
                           </span>
                         </div>
@@ -695,55 +727,70 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
               </div>
             </section>
 
-            {/* 24h Trending Backdrops — Fixed-Height Internally Scrollable */}
-            {trendingBackdrops.length > 0 && (
-              <section className="ton-card rounded-2xl p-3.5 sm:p-4">
-                <div className="flex items-center justify-between mb-2.5">
-                  <h3 className="font-display text-[13px] font-extrabold text-[#0B1120] flex items-center gap-1.5">
-                    <Flame className="w-4 h-4 text-[#0098EA]" />
-                    Топ фони (Тренди 24г) ({trendingBackdrops.length})
-                  </h3>
-                  <button
-                    type="button"
-                    onClick={() => setSubTab('trends')}
-                    className="text-[11px] font-bold text-[#0077C8] hover:text-[#0098EA] cursor-pointer"
-                  >
-                    Всі тренди →
-                  </button>
-                </div>
-                <div className="max-h-[340px] overflow-y-auto pr-1 space-y-2">
-                  {trendingBackdrops.map((tb, idx) => {
-                    const label = tb.name || tb.backdrop || 'Backdrop';
-                    const color = tb.swatch_hex || tb.color_hex || tb.hex || '#0098EA';
-                    const boost = tb.fair_value_boost_percent ?? tb.boost_percent ?? 0;
-                    return (
-                      <div
-                        key={`${label}-${idx}`}
-                        className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-xs tabular-nums"
-                      >
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span
-                            className="w-3.5 h-3.5 rounded-full border border-[#0B1120]/15 shrink-0"
-                            style={{ backgroundColor: color }}
-                          />
-                          <span className="font-bold text-[#0B1120] truncate">{label}</span>
-                        </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <span className="font-extrabold text-[#0077C8]">
-                            +{tb.avg_premium_percent.toFixed(0)}%
-                          </span>
-                          {boost > 0 && (
-                            <span className="px-1.5 py-0.5 rounded bg-[#E8F5FE] text-[#0098EA] text-[10px] font-extrabold">
-                              FV +{boost.toFixed(0)}%
-                            </span>
-                          )}
+            {/* Фони — All 80 Backdrops + Collection Filter + Real Radial Gradients */}
+            <section className="ton-card rounded-2xl p-3.5 sm:p-4">
+              <div className="flex items-center justify-between gap-2 mb-2.5">
+                <h3 className="font-display text-[13.5px] font-extrabold text-[#0B1120] flex items-center gap-1.5 shrink-0">
+                  <Palette className="w-4 h-4 text-[#0098EA]" />
+                  Фони
+                </h3>
+                <select
+                  value={selectedBackdropCol}
+                  onChange={(e) => setSelectedBackdropCol(e.target.value)}
+                  className="bg-[#F4F7FB] border border-[#E2E8F0] rounded-xl text-xs font-bold text-[#0B1120] h-8 px-2.5 max-w-[210px] focus:outline-none focus:border-[#0098EA]"
+                >
+                  <option value="">Всі колекції (80 фонів)</option>
+                  {collections.map((c) => (
+                    <option key={c.short_name} value={c.short_name}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="max-h-[340px] overflow-y-auto pr-1 space-y-2">
+                {trendingBackdrops.map((tb, idx) => {
+                  const label = tb.name || tb.backdrop || 'Backdrop';
+                  const swatchBg =
+                    tb.center_hex && tb.edge_hex
+                      ? `radial-gradient(circle, ${tb.center_hex} 0%, ${tb.edge_hex} 100%)`
+                      : tb.swatch_hex || tb.color_hex || tb.hex || '#0098EA';
+                  const colCount = tb.collections_count ?? tb.collection_count ?? 124;
+                  return (
+                    <div
+                      key={`${label}-${idx}`}
+                      className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-xs tabular-nums"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span
+                          className="w-5 h-5 rounded-full border border-[#0B1120]/15 shrink-0 shadow-2xs"
+                          style={{ background: swatchBg }}
+                        />
+                        <div className="min-w-0">
+                          <p className="font-extrabold text-[#0B1120] truncate">{label}</p>
+                          <p className="text-[10px] text-[#64748B]">
+                            {typeof tb.rarity_percent === 'number'
+                              ? `Рідкість ${tb.rarity_percent.toFixed(1)}%`
+                              : `${colCount} колекцій`}
+                            {typeof tb.supply === 'number' ? ` · ${tb.supply} шт` : ''}
+                          </p>
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              </section>
-            )}
+                      <div className="text-right shrink-0">
+                        {typeof tb.floor_price === 'number' && tb.floor_price > 0 ? (
+                          <p className="font-extrabold text-[#0B1120]">
+                            {formatTon(tb.floor_price)} TON
+                          </p>
+                        ) : null}
+                        <span className="font-extrabold text-[#0077C8] text-[11px]">
+                          +{tb.avg_premium_percent.toFixed(1)}% до флора
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
 
             {/* Quick Whale Signals Preview on Desktop */}
             {whales.length > 0 && (
@@ -788,21 +835,25 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
       {/* TAB 2: 24H TRENDS & TOP VISUAL FINDS */}
       {subTab === 'trends' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-          {/* Left: Trending Backdrops Today */}
+          {/* Left: Фони (All 80 Backdrops + Collection Filter + Real Gradients) */}
           <section className="lg:col-span-5 ton-card rounded-2xl p-3.5 sm:p-4 space-y-3">
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <h2 className="font-display text-[14px] font-extrabold text-[#0B1120] flex items-center gap-1.5">
-                  <Palette className="w-4 h-4 text-[#0098EA]" />
-                  Популярні фони сьогодні
-                </h2>
-                <p className="text-[11px] text-[#64748B] mt-0.5">
-                  Фони, що торгуються вище флора на +15–40% за останні 24 години
-                </p>
-              </div>
-              <span className="px-2 py-0.5 rounded-full bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] text-[10px] font-extrabold shrink-0">
-                LIVE 24г
-              </span>
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="font-display text-[14px] font-extrabold text-[#0B1120] flex items-center gap-1.5">
+                <Palette className="w-4 h-4 text-[#0098EA]" />
+                Фони
+              </h2>
+              <select
+                value={selectedBackdropCol}
+                onChange={(e) => setSelectedBackdropCol(e.target.value)}
+                className="bg-[#F4F7FB] border border-[#E2E8F0] rounded-xl text-xs font-bold text-[#0B1120] h-8 px-2.5 max-w-[210px] focus:outline-none focus:border-[#0098EA]"
+              >
+                <option value="">Всі колекції (80 фонів)</option>
+                {collections.map((c) => (
+                  <option key={c.short_name} value={c.short_name}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
             </div>
 
             {trendsLoading ? (
@@ -816,18 +867,17 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
               </div>
             ) : trendingBackdrops.length === 0 ? (
               <div className="rounded-xl p-5 bg-[#F8FAFC] border border-[#E2E8F0] text-center text-xs text-[#64748B]">
-                Збираємо статистику премій по фонах за останні 24 години...
+                Збираємо статистику по фонах...
               </div>
             ) : (
               <div className="max-h-[340px] overflow-y-auto pr-1 space-y-2">
                 {trendingBackdrops.map((tb, idx) => {
                   const name = tb.name || tb.backdrop || 'Backdrop';
-                  const swatch = tb.swatch_hex || tb.color_hex || tb.hex || '#0098EA';
-                  const colCount = tb.collections_count ?? tb.collection_count ?? 0;
-                  const boost =
-                    tb.fair_value_boost_percent ??
-                    tb.boost_percent ??
-                    Math.min(18, Math.round(tb.avg_premium_percent * 0.45));
+                  const swatchBg =
+                    tb.center_hex && tb.edge_hex
+                      ? `radial-gradient(circle, ${tb.center_hex} 0%, ${tb.edge_hex} 100%)`
+                      : tb.swatch_hex || tb.color_hex || tb.hex || '#0098EA';
+                  const colCount = tb.collections_count ?? tb.collection_count ?? 124;
 
                   return (
                     <div
@@ -838,7 +888,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                         <div className="w-9 h-9 rounded-xl bg-white border border-[#E2E8F0] flex items-center justify-center shrink-0">
                           <span
                             className="w-5 h-5 rounded-full border border-[#0B1120]/20 shadow-2xs"
-                            style={{ backgroundColor: swatch }}
+                            style={{ background: swatchBg }}
                           />
                         </div>
                         <div className="min-w-0">
@@ -846,22 +896,23 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                             {name}
                           </p>
                           <p className="text-[10.5px] text-[#64748B] tabular-nums">
-                            {colCount} колекцій
-                            {tb.sample_collections && tb.sample_collections.length > 0
-                              ? ` · ${tb.sample_collections.slice(0, 2).join(', ')}`
-                              : ''}
+                            {typeof tb.rarity_percent === 'number'
+                              ? `Рідкість ${tb.rarity_percent.toFixed(1)}%`
+                              : `${colCount} колекцій`}
+                            {typeof tb.supply === 'number' ? ` · ${tb.supply} шт` : ''}
                           </p>
                         </div>
                       </div>
 
-                      <div className="text-right shrink-0 tabular-nums space-y-1">
-                        <p className="text-[13px] font-extrabold text-[#0077C8]">
+                      <div className="text-right shrink-0 tabular-nums space-y-0.5">
+                        {typeof tb.floor_price === 'number' && tb.floor_price > 0 && (
+                          <p className="text-[13px] font-extrabold text-[#0B1120]">
+                            {formatTon(tb.floor_price)} TON
+                          </p>
+                        )}
+                        <p className="text-[11.5px] font-extrabold text-[#0077C8]">
                           +{tb.avg_premium_percent.toFixed(1)}% до флора
                         </p>
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#E8F5FE] text-[#0098EA] border border-[#BAE3FC] text-[10px] font-extrabold">
-                          <Sparkles className="w-2.5 h-2.5" />
-                          Fair Value +{boost}%
-                        </span>
                       </div>
                     </div>
                   );

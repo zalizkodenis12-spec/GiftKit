@@ -6,6 +6,7 @@ import asyncio
 import html
 import re
 import time
+import urllib.parse
 from typing import Any
 
 import httpx
@@ -231,12 +232,27 @@ class PortalsClient:
         return {c["short_name"]: c["floor_price"] for c in cols if c["floor_price"] > 0}
 
     async def get_collection_filters(
-        self, short_names: list[str], force_refresh: bool = False
+        self,
+        short_names: list[str],
+        force_refresh: bool = False,
+        col_name_map: dict[str, str] | None = None,
     ) -> dict[str, dict[str, list[dict[str, Any]]]]:
         """GET /collections/filters?short_names=... (cached 5min per collection)."""
         cleaned = [s.strip().lower() for s in short_names if s and s.strip()]
         if not cleaned:
             return {}
+
+        # Merge known collection display names from cache if available
+        known_names: dict[str, str] = {}
+        cached_cols = self._cache_get("collections:all:250", allow_stale=True) or self._cache_get("collections:all:120", allow_stale=True)
+        if isinstance(cached_cols, list):
+            for c in cached_cols:
+                if isinstance(c, dict) and c.get("short_name") and c.get("name"):
+                    known_names[str(c["short_name"]).lower()] = str(c["name"])
+        if col_name_map:
+            for k, v in col_name_map.items():
+                if k and v:
+                    known_names[k.strip().lower()] = str(v).strip()
 
         result: dict[str, dict[str, list[dict[str, Any]]]] = {}
         missing: list[str] = []
@@ -244,6 +260,14 @@ class PortalsClient:
             if not force_refresh:
                 cached = self._cache_get(f"filters:{s}")
                 if cached is not None:
+                    c_name = known_names.get(s, "")
+                    if c_name:
+                        for m in cached.get("models") or []:
+                            if "cdn.changes.tg" not in str(m.get("photo_url") or ""):
+                                m["photo_url"] = (
+                                    f"https://cdn.changes.tg/gifts/models/"
+                                    f"{urllib.parse.quote(c_name)}/png/{urllib.parse.quote(str(m.get('name') or ''))}.png"
+                                )
                     result[s] = cached
                     continue
             missing.append(s)
@@ -260,7 +284,8 @@ class PortalsClient:
                 if isinstance(cols_map, dict):
                     for s in batch:
                         raw_traits = cols_map.get(s) or {}
-                        parsed = self._normalize_filters(raw_traits, short_name=s)
+                        c_name = known_names.get(s, "")
+                        parsed = self._normalize_filters(raw_traits, short_name=s, collection_name=c_name)
                         self._cache_set(f"filters:{s}", parsed, ttl=300.0)
                         result[s] = parsed
                 else:
@@ -273,9 +298,11 @@ class PortalsClient:
     def _normalize_filters(
         raw: dict[str, Any],
         short_name: str = "",
+        collection_name: str = "",
     ) -> dict[str, list[dict[str, Any]]]:
         out: dict[str, list[dict[str, Any]]] = {"models": [], "backdrops": [], "symbols": []}
         clean_short = (short_name or "").strip().lower()
+        clean_col_name = (collection_name or "").strip()
         for key in ("models", "backdrops", "symbols"):
             items = raw.get(key)
             if not isinstance(items, list):
@@ -289,23 +316,79 @@ class PortalsClient:
                     to_float(item.get("rarity_per_mille") or item.get("rarityPermille"), 1.0),
                     2,
                 )
-                photo_url = str(item.get("url") or "").strip() or (
+                primary_url = (
+                    f"https://cdn.changes.tg/gifts/models/{urllib.parse.quote(clean_col_name)}/png/{urllib.parse.quote(name)}.png"
+                    if key == "models" and clean_col_name
+                    else ""
+                )
+                fallback_url = (
                     f"https://storage.portal-market.com/portals-market/gifts/{clean_short}/models/png/{re.sub(r'[^a-z0-9]', '', name.lower())}.png"
                     if key == "models" and clean_short
                     else ""
                 )
-                parsed_items.append(
-                    {
-                        "name": name,
-                        "rarity_percent": rarity,
-                        "floor_price": round(to_float(item.get("floor_price"), 0.0), 2),
-                        "supply": to_int(item.get("supply"), 0),
-                        "photo_url": photo_url,
-                    }
-                )
+                raw_url = str(item.get("url") or "").strip()
+                photo_url = raw_url or primary_url or fallback_url
+                entry: dict[str, Any] = {
+                    "name": name,
+                    "rarity_percent": rarity,
+                    "floor_price": round(to_float(item.get("floor_price"), 0.0), 2),
+                    "supply": to_int(item.get("supply"), 0),
+                    "photo_url": photo_url,
+                }
+                if key == "models":
+                    entry["fallback_photo_url"] = fallback_url
+                parsed_items.append(entry)
             parsed_items.sort(key=lambda x: x["floor_price"], reverse=True)
             out[key] = parsed_items
         return out
+
+    async def get_official_backdrops_catalog(self) -> dict[str, dict[str, Any]]:
+        """Fetch & cache (6h) all 80 official Telegram backdrops from https://cdn.changes.tg/gifts/backdrops.json."""
+        cache_key = "official_backdrops_catalog_v1"
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        catalog: dict[str, dict[str, Any]] = {}
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(6.0, connect=3.0),
+                headers={"User-Agent": "Mozilla/5.0 (compatible; GiftKitBot/1.2)"},
+                follow_redirects=True,
+            ) as client:
+                resp = await client.get("https://cdn.changes.tg/gifts/backdrops.json")
+                if resp.status_code == 200:
+                    raw_list = resp.json()
+                    if isinstance(raw_list, list):
+                        for item in raw_list:
+                            if not isinstance(item, dict):
+                                continue
+                            name = str(item.get("name") or "").strip()
+                            if not name:
+                                continue
+                            hex_obj = item.get("hex") if isinstance(item.get("hex"), dict) else {}
+                            center_hex = str(hex_obj.get("centerColor") or "#1E293B").strip()
+                            edge_hex = str(hex_obj.get("edgeColor") or center_hex).strip()
+                            pattern_hex = str(hex_obj.get("patternColor") or edge_hex).strip()
+                            text_hex = str(hex_obj.get("textColor") or "#F8FAFC").strip()
+                            catalog[name.lower()] = {
+                                "name": name,
+                                "center_hex": center_hex,
+                                "edge_hex": edge_hex,
+                                "pattern_hex": pattern_hex,
+                                "text_hex": text_hex,
+                            }
+        except Exception as exc:
+            logger.debug(f"get_official_backdrops_catalog fetch skipped: {exc}")
+
+        if catalog:
+            self._cache_set(cache_key, catalog, ttl=21600.0)
+            return catalog
+
+        stale = self._cache_get(cache_key, allow_stale=True)
+        if stale is not None:
+            return stale
+        return {}
 
     async def scrape_telegram_nft_metadata(self, slug: str) -> dict[str, Any] | None:
         """Scrape official https://t.me/nft/{slug} page for real Model, Backdrop, Symbol & Owner."""
@@ -391,6 +474,7 @@ class PortalsClient:
         min_price: float | None = None,
         max_price: float | None = None,
         search: str | None = None,
+        filter_by_models: str | None = None,
         force_refresh: bool = False,
     ) -> list[dict[str, Any]]:
         """GET /nfts/search (cached 12s)."""
@@ -403,6 +487,8 @@ class PortalsClient:
             params["max_price"] = max_price
         if search:
             params["search"] = search
+        if filter_by_models:
+            params["filter_by_models"] = filter_by_models
 
         cache_key = f"nfts:{sorted(params.items())}"
         if not force_refresh:

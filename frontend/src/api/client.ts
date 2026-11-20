@@ -377,7 +377,11 @@ export const api = {
 
   getWhales: () => request<WhalesResponse>('/analytics/whales'),
 
-  getTrends: () => request<TrendsResponse>('/analytics/trends'),
+  getTrends: (collection?: string) =>
+    request<TrendsResponse>(`/analytics/trends${toQuery({ collection })}`),
+
+  inspectCollectionModel: (short_name: string, model_name: string) =>
+    request<XRayResponse>(`/analytics/model-preview${toQuery({ short_name, model_name })}`),
 
   runVisionScore: (payload: VisionScorePayload) =>
     request<VisionScoreResponse>('/analytics/vision-score', {

@@ -1,29 +1,25 @@
 import React, { useState } from 'react';
 import {
-  AlertTriangle,
-  Bell,
   Briefcase,
-  Check,
-  Flame,
+  ExternalLink,
+  Eye,
   Plus,
-  ShieldCheck,
   Trash2,
-  TrendingUp,
   X,
-  Zap,
 } from 'lucide-react';
 import { api } from '../api/client';
 import type {
+  AnalyzedListing,
   CollectionSummary,
   PortfolioItem,
   PortfolioResponse,
 } from '../types/api';
 import {
-  formatPercent,
   formatTon,
   formatUsd,
   getMarketMeta,
   haptic,
+  openExternalLink,
 } from '../utils/format';
 import { NftImage } from '../components/NftImage';
 
@@ -32,14 +28,9 @@ interface PortfolioPageProps {
   collections: CollectionSummary[];
   tonUsd: number;
   loading: boolean;
+  onSelectListing: (item: AnalyzedListing) => void;
   onReload: () => Promise<void>;
   onNotify: (title: string, message?: string, variant?: 'info' | 'success' | 'warning' | 'error') => void;
-}
-
-interface ItemDraft {
-  min_price_guard: string;
-  undercut_step: string;
-  listed_price: string;
 }
 
 export const PortfolioPage: React.FC<PortfolioPageProps> = ({
@@ -47,234 +38,181 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
   collections,
   tonUsd,
   loading,
+  onSelectListing,
   onReload,
   onNotify,
 }) => {
-  const [drafts, setDrafts] = useState<Record<number, ItemDraft>>({});
-  const [busyId, setBusyId] = useState<number | null>(null);
+  const [openingId, setOpeningId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
-  // Add NFT Modal
+  // Add Saved NFT Modal
   const [showAddModal, setShowAddModal] = useState(false);
   const [savingNew, setSavingNew] = useState(false);
   const [newCollection, setNewCollection] = useState(collections[0]?.short_name || 'eternalrose');
-  const [newNumber, setNewNumber] = useState('1245');
-  const [newBuyPrice, setNewBuyPrice] = useState('25');
-  const [newListedPrice, setNewListedPrice] = useState('31');
+  const [newNumber, setNewNumber] = useState('');
+  const [newBuyPrice, setNewBuyPrice] = useState('');
   const [newMarket, setNewMarket] = useState('portals');
-  const [newMinGuard, setNewMinGuard] = useState('28');
 
-  const summary = portfolio?.summary;
   const items = portfolio?.items || [];
+  const totalValueTon = items.reduce(
+    (sum, it) => sum + Number(it.current_floor || it.buy_price || 0),
+    0,
+  );
 
-  const getDraft = (item: PortfolioItem): ItemDraft =>
-    drafts[item.id] ?? {
-      min_price_guard: String(item.min_price_guard ?? ''),
-      undercut_step: String(item.undercut_step ?? 0.05),
-      listed_price: item.listed_price !== null ? String(item.listed_price) : '',
-    };
-
-  const updateDraft = (id: number, patch: Partial<ItemDraft>, item: PortfolioItem) => {
-    const cur = getDraft(item);
-    setDrafts((prev) => ({ ...prev, [id]: { ...cur, ...patch } }));
-  };
-
-  const handleToggleUndercut = async (item: PortfolioItem) => {
+  const handleOpenFullscreen = async (item: PortfolioItem) => {
     haptic('light');
-    setBusyId(item.id);
+    if (item.listing && typeof item.listing.price === 'number') {
+      onSelectListing(item.listing);
+      return;
+    }
+    setOpeningId(item.id);
     try {
-      await api.updatePortfolioItem(item.id, {
-        auto_undercut_enabled: !item.auto_undercut_enabled,
+      const query = item.tg_id || `${item.collection_name} #${item.number}`;
+      const res = await api.runXRay(query);
+      onSelectListing(res.item);
+    } catch {
+      // Fallback preview so user can always open saved item cleanly
+      onSelectListing({
+        id: String(item.id),
+        tg_id: item.tg_id,
+        collection_id: item.short_name,
+        collection_name: item.collection_name,
+        short_name: item.short_name,
+        number: item.number,
+        photo_url: item.photo_url,
+        market: item.market,
+        market_url: item.market_url || `https://t.me/nft/${item.tg_id}`,
+        price: item.buy_price,
+        collection_floor: item.current_floor,
+        fair_value: item.fair_value,
+        discount_percent: 0,
+        net_profit_ton: item.pnl_ton,
+        net_profit_percent: item.pnl_percent,
+        fee_percent: 5,
+        liquidity_score: 75,
+        sales_24h: 0,
+        is_rare_combo: false,
+        wash_trade_risk: false,
+        best_sell_market: item.best_sell_market,
+        best_sell_price: item.best_sell_price,
+        verdict: 'FAIR',
+        verdict_label: 'Збережено в портфелі',
+        listed_at: new Date().toISOString(),
+        attributes: [],
+        market_prices: [],
+        recent_sales: [],
+        is_live: true,
       });
-      await onReload();
-      onNotify(
-        !item.auto_undercut_enabled ? 'Auto-Undercut увімкнено' : 'Auto-Undercut вимкнено',
-        `${item.collection_name} #${item.number}`,
-        'info',
-      );
-    } catch (err) {
-      onNotify('Помилка оновлення', err instanceof Error ? err.message : '', 'error');
     } finally {
-      setBusyId(null);
+      setOpeningId(null);
     }
   };
 
-  const handleModeChange = async (item: PortfolioItem, mode: 'auto' | 'notify') => {
+  const handleDelete = async (e: React.MouseEvent, item: PortfolioItem) => {
+    e.stopPropagation();
     haptic('light');
-    setBusyId(item.id);
-    try {
-      await api.updatePortfolioItem(item.id, { undercut_mode: mode });
-      await onReload();
-    } catch (err) {
-      onNotify('Помилка зміни режиму', err instanceof Error ? err.message : '', 'error');
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const handleSaveGuard = async (item: PortfolioItem) => {
-    haptic('medium');
-    const draft = getDraft(item);
-    setBusyId(item.id);
-    try {
-      await api.updatePortfolioItem(item.id, {
-        min_price_guard: Number(draft.min_price_guard),
-        undercut_step: Number(draft.undercut_step),
-        listed_price: draft.listed_price ? Number(draft.listed_price) : item.listed_price,
-      });
-      await onReload();
-      onNotify('Захист збережено', `${item.collection_name} #${item.number}`, 'success');
-    } catch (err) {
-      onNotify('Помилка збереження', err instanceof Error ? err.message : '', 'error');
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const handleApplyUndercut = async (item: PortfolioItem) => {
-    haptic('success');
-    setBusyId(item.id);
-    try {
-      const res = await api.applyUndercut(item.id);
-      await onReload();
-      onNotify(
-        'Ціну знижено під конкурента!',
-        res.message ||
-          `Нова ціна: ${formatTon(res.new_price ?? item.suggested_price ?? item.listed_price)} TON`,
-        'success',
-      );
-    } catch (err) {
-      onNotify('Не вдалося застосувати undercut', err instanceof Error ? err.message : '', 'error');
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  const handleDelete = async (item: PortfolioItem) => {
-    haptic('light');
+    setDeletingId(item.id);
     try {
       await api.deletePortfolioItem(item.id);
       await onReload();
-      onNotify('Позицію видалено', `${item.collection_name} #${item.number}`, 'info');
+      onNotify('Видалено з портфеля', `${item.collection_name} #${item.number}`, 'info');
     } catch (err) {
       onNotify('Помилка видалення', err instanceof Error ? err.message : '', 'error');
+    } finally {
+      setDeletingId(null);
     }
   };
 
-  const handleAddItem = async (e: React.FormEvent) => {
+  const handleAddNew = async (e: React.FormEvent) => {
     e.preventDefault();
+    const col = collections.find((c) => c.short_name === newCollection) || collections[0];
+    const num = Math.max(1, Number(newNumber) || 1);
+    const price = Number(newBuyPrice) || col?.floor_price || 10;
+    const colName = col?.name || newCollection;
+    const shortName = col?.short_name || newCollection;
+    const tgId = `${colName.replace(/[^A-Za-z0-9]/g, '')}-${num}`;
+
     setSavingNew(true);
     try {
-      const found = collections.find((c) => c.short_name === newCollection);
-      const colName = found?.name || newCollection;
+      let xrayListing: AnalyzedListing | undefined;
+      try {
+        const xr = await api.runXRay(`${colName} #${num}`);
+        xrayListing = xr.item;
+      } catch {
+        // optional enrichment
+      }
+
       await api.addPortfolioItem({
-        collection_name: colName,
-        short_name: newCollection,
-        number: Number(newNumber) || 1,
-        photo_url: found?.photo_url,
-        buy_price: Number(newBuyPrice),
-        listed_price: newListedPrice ? Number(newListedPrice) : null,
+        tg_id: xrayListing?.tg_id || tgId,
+        collection_name: xrayListing?.collection_name || colName,
+        short_name: xrayListing?.short_name || shortName,
+        number: num,
+        photo_url:
+          xrayListing?.photo_url ||
+          `https://nft.fragment.com/gift/${shortName}-${num}.large.jpg`,
+        buy_price: price,
+        listed_price: xrayListing?.fair_value || price,
         market: newMarket,
-        auto_undercut_enabled: true,
+        auto_undercut_enabled: false,
         undercut_mode: 'notify',
-        min_price_guard: Number(newMinGuard) || Number(newBuyPrice),
+        min_price_guard: price,
         undercut_step: 0.05,
-        status: newListedPrice ? 'listed' : 'holding',
+        status: 'holding',
+        listing: xrayListing || null,
       });
       setShowAddModal(false);
+      setNewNumber('');
+      setNewBuyPrice('');
       await onReload();
-      onNotify('NFT додано до портфеля', `${colName} #${newNumber}`, 'success');
+      onNotify('Збережено в портфель', `${colName} #${num}`, 'success');
     } catch (err) {
-      onNotify('Помилка додавання', err instanceof Error ? err.message : '', 'error');
+      onNotify('Помилка збереження', err instanceof Error ? err.message : '', 'error');
     } finally {
       setSavingNew(false);
     }
   };
 
-  const pnlPositive = (summary?.unrealized_pnl_ton ?? 0) >= 0;
-
   return (
     <div className="space-y-4 pb-4">
-      {/* Blue Gradient Portfolio Summary Card */}
-      <section className="ton-gradient-banner rounded-[24px] p-4 sm:p-5 text-white relative overflow-hidden">
-        <div className="absolute -right-8 -top-8 w-36 h-36 rounded-full bg-white/10 pointer-events-none" />
-        <div className="absolute -left-6 -bottom-10 w-32 h-32 rounded-full bg-white/10 pointer-events-none" />
-
-        <div className="relative z-10 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-          <div className="flex items-start justify-between gap-3 lg:block">
-            <div>
-              <p className="text-[11px] font-semibold text-white/80">
-                Оцінка моїх NFT
-              </p>
-              <div className="flex items-baseline gap-2 mt-0.5 tabular-nums">
-                <h2 className="font-display text-[26px] sm:text-[30px] font-extrabold tracking-tight">
-                  {formatTon(summary?.current_value_ton ?? 0)}{' '}
-                  <span className="text-base font-bold text-white/90">TON</span>
-                </h2>
-                <span className="text-xs font-semibold text-white/80">
-                  {formatUsd(summary?.current_value_ton ?? 0, tonUsd)}
-                </span>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                haptic('light');
-                setShowAddModal(true);
-              }}
-              className="lg:hidden h-9 px-3 rounded-xl bg-white/20 hover:bg-white/30 backdrop-blur-md text-white text-xs font-bold inline-flex items-center gap-1 border border-white/25 cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Додати NFT</span>
-            </button>
+      {/* Header Summary Card */}
+      <section className="rounded-3xl p-4 sm:p-5 bg-gradient-to-br from-[#0098EA] via-[#0086D6] to-[#0070B8] text-white shadow-lg shadow-[#0098EA]/20 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-wider text-white/80">
+            Портфель · Збережені NFT
+          </p>
+          <div className="flex items-baseline gap-2.5 mt-1 tabular-nums">
+            <span className="font-display text-2xl sm:text-3xl font-extrabold">
+              {items.length} NFT
+            </span>
+            {totalValueTon > 0 && (
+              <span className="text-sm font-bold text-white/85">
+                ≈ {formatTon(totalValueTon)} TON ({formatUsd(totalValueTon * tonUsd)})
+              </span>
+            )}
           </div>
-
-          <div className="grid grid-cols-3 gap-3 lg:gap-8 pt-3 lg:pt-0 border-t lg:border-t-0 border-white/20 tabular-nums items-center">
-            <div>
-              <p className="text-[10.5px] text-white/75 font-medium">Куплено за</p>
-              <p className="text-[14px] sm:text-[15px] font-extrabold">
-                {formatTon(summary?.total_invested_ton ?? 0)} TON
-              </p>
-            </div>
-            <div>
-              <p className="text-[10.5px] text-white/75 font-medium">Різниця</p>
-              <p
-                className={`text-[14px] sm:text-[15px] font-extrabold ${
-                  pnlPositive ? 'text-white' : 'text-white/80'
-                }`}
-              >
-                {pnlPositive ? '+' : ''}
-                {formatTon(summary?.unrealized_pnl_ton ?? 0)} (
-                {formatPercent(summary?.unrealized_pnl_percent ?? 0)})
-              </p>
-            </div>
-            <div className="text-right lg:text-left">
-              <p className="text-[10.5px] text-white/75 font-medium">Під контролем</p>
-              <p className="text-[14px] sm:text-[15px] font-extrabold">
-                {summary?.undercut_active_count ?? 0} з {items.length} NFT
-              </p>
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              haptic('light');
-              setShowAddModal(true);
-            }}
-            className="hidden lg:inline-flex h-10 px-4 rounded-xl bg-white/20 hover:bg-white/30 backdrop-blur-md text-white text-xs font-bold items-center gap-1.5 border border-white/25 cursor-pointer shrink-0"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Додати NFT</span>
-          </button>
+          <p className="text-[11.5px] text-white/80 mt-1">
+            Ваша особиста колекція цікавих NFT — зберігаються без сповіщень, натисніть на картку для повного перегляду
+          </p>
         </div>
+
+        <button
+          type="button"
+          onClick={() => {
+            haptic('light');
+            setShowAddModal(true);
+          }}
+          className="h-10 px-4 rounded-xl bg-white/18 hover:bg-white/28 border border-white/30 text-white text-xs font-extrabold inline-flex items-center justify-center gap-1.5 backdrop-blur-sm cursor-pointer shrink-0 transition-colors"
+        >
+          <Plus className="w-4 h-4" />
+          <span>Додати NFT</span>
+        </button>
       </section>
 
-      {/* Holdings Grid */}
-      {loading && items.length === 0 ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+      {/* Saved NFTs Grid */}
+      {loading ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="ton-card rounded-2xl p-4 h-56 animate-pulse" />
+            <div key={i} className="ton-card rounded-2xl p-4 h-44 animate-pulse bg-white" />
           ))}
         </div>
       ) : items.length === 0 ? (
@@ -282,46 +220,53 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
           <div className="w-12 h-12 rounded-2xl bg-[#E8F5FE] border border-[#BAE3FC] flex items-center justify-center mx-auto mb-2.5">
             <Briefcase className="w-5 h-5 text-[#0098EA]" />
           </div>
-          <p className="text-sm font-bold text-[#0B1120]">Портфель порожній</p>
-          <p className="text-xs text-[#64748B] mt-1">
-            Купіть NFT зі Сканера або додайте свої подарунки вручну для Auto-Undercut моніторингу.
+          <p className="text-sm font-extrabold text-[#0B1120]">Портфель порожній</p>
+          <p className="text-xs text-[#64748B] mt-1 leading-relaxed">
+            Зберігайте сюди будь-які цікаві NFT зі Сканера, Аналітики чи Снайпера — вони лежатимуть тут без зайвих сповіщень, і ви зможете відкрити будь-який у повний екран у будь-який момент.
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 items-start">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {items.map((item) => {
-            const marketMeta = getMarketMeta(item.market);
-            const bestSellMeta = getMarketMeta(item.best_sell_market);
-            const draft = getDraft(item);
-            const isBusy = busyId === item.id;
-            const pnlUp = item.pnl_ton >= 0;
+            const mMeta = getMarketMeta(item.market);
+            const isOpening = openingId === item.id;
+            const isDeleting = deletingId === item.id;
+            const tgNftUrl = item.tg_id ? `https://t.me/nft/${item.tg_id}` : '';
 
             return (
               <div
                 key={item.id}
-                className={`ton-card rounded-2xl p-3.5 space-y-3 ${
-                  item.is_undercut_by_competitor ? 'border-[#0098EA] ring-1 ring-[#BAE3FC]' : ''
-                }`}
+                onClick={() => handleOpenFullscreen(item)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handleOpenFullscreen(item);
+                  }
+                }}
+                className="ton-card ton-card-hover rounded-2xl p-3.5 flex flex-col justify-between gap-3 cursor-pointer text-left"
               >
-                {/* Top Info Row */}
                 <div className="flex items-start gap-3">
-                  <div className="w-14 h-14 rounded-2xl overflow-hidden bg-[#F4F7FB] border border-[#E2E8F0] shrink-0">
+                  <div className="w-16 h-16 rounded-2xl overflow-hidden bg-[#F4F7FB] border border-[#E2E8F0] shrink-0">
                     <NftImage
-                      src={item.photo_url}
-                      alt={item.collection_name}
+                      src={item.photo_url || item.listing?.photo_url}
+                      alt={`${item.collection_name} #${item.number}`}
+                      fallbackText={item.collection_name}
                       className="w-full h-full object-cover"
                     />
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <h3 className="text-[14px] font-extrabold text-[#0B1120] truncate">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-1.5">
+                      <h3 className="text-[13.5px] font-extrabold text-[#0B1120] leading-tight truncate">
                         {item.collection_name}{' '}
-                        <span className="text-[#0098EA] tabular-nums">#{item.number}</span>
+                        <span className="text-[#64748B] font-bold">#{item.number}</span>
                       </h3>
                       <button
                         type="button"
-                        onClick={() => handleDelete(item)}
-                        className="text-[#64748B] hover:text-[#DC2626] p-1 cursor-pointer"
+                        disabled={isDeleting}
+                        onClick={(e) => handleDelete(e, item)}
+                        className="p-1.5 rounded-lg text-[#64748B] hover:text-[#DC2626] hover:bg-[#FEF2F2] transition-colors cursor-pointer shrink-0 disabled:opacity-50"
                         title="Видалити з портфеля"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -330,232 +275,66 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
 
                     <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                       <span
-                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border ${marketMeta.bg} ${marketMeta.text} ${marketMeta.border}`}
+                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[9.5px] font-bold ${mMeta.bg} ${mMeta.text} ${mMeta.border}`}
                       >
-                        <span className={`w-1.5 h-1.5 rounded-full ${marketMeta.dot}`} />
-                        {marketMeta.label}
+                        <span className={`w-1.5 h-1.5 rounded-full ${mMeta.dot}`} />
+                        {mMeta.label}
                       </span>
-                      <span
-                        className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold tabular-nums ${
-                          pnlUp
-                            ? 'bg-[#E8F5FE] text-[#0077C8]'
-                            : 'bg-[#F1F5F9] text-[#334155]'
-                        }`}
-                      >
-                        PnL {pnlUp ? '+' : ''}
-                        {formatTon(item.pnl_ton)} TON ({formatPercent(item.pnl_percent)})
-                      </span>
+                      {item.listing?.harmony_label && (
+                        <span className="px-1.5 py-0.5 rounded bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] text-[9.5px] font-bold">
+                          {item.listing.harmony_label}
+                        </span>
+                      )}
                     </div>
-                  </div>
-                </div>
 
-                {/* Prices Comparison */}
-                <div className="grid grid-cols-3 gap-1.5 text-center tabular-nums">
-                  <div className="rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] py-2 px-1">
-                    <p className="text-[10px] text-[#64748B] font-semibold">Куплено</p>
-                    <p className="text-[13px] font-extrabold text-[#0B1120]">
-                      {formatTon(item.buy_price)} TON
-                    </p>
-                  </div>
-                  <div className="rounded-xl bg-[#E8F5FE]/70 border border-[#BAE3FC] py-2 px-1">
-                    <p className="text-[10px] text-[#0077C8] font-semibold">Ваш лістинг</p>
-                    <p className="text-[13px] font-extrabold text-[#0098EA]">
-                      {item.listed_price ? `${formatTon(item.listed_price)} TON` : 'Холд'}
-                    </p>
-                  </div>
-                  <div className="rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] py-2 px-1">
-                    <p className="text-[10px] text-[#64748B] font-semibold">Живий флор</p>
-                    <p className="text-[13px] font-extrabold text-[#0B1120]">
-                      {formatTon(item.current_floor)} TON
-                    </p>
-                  </div>
-                </div>
-
-                {/* Protective Floor Guard Active Banner */}
-                {!item.is_undercut_by_competitor && item.hit_min_guard && (
-                  <div className="rounded-2xl p-3 bg-[#E8F5FE] border border-[#BAE3FC] flex items-start gap-2.5">
-                    <ShieldCheck className="w-4.5 h-4.5 text-[#0098EA] shrink-0 mt-0.5" />
-                    <div className="text-[11.5px] leading-snug">
-                      <p className="font-extrabold text-[#0B1120]">
-                        Захист мін. ціни спрацював ({formatTon(item.min_price_guard)} TON)
-                      </p>
-                      <p className="text-[#334155] mt-0.5 tabular-nums">
-                        Конкурент нижче вашого ліміту ({formatTon(item.competitor_price ?? item.current_floor)} TON) — продаж у мінус заблоковано.
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Competitor Undercut Alert */}
-                {item.is_undercut_by_competitor && (
-                  <div className="rounded-2xl p-3 bg-[#E8F5FE] border border-[#BAE3FC] space-y-2">
-                    <div className="flex items-start gap-2">
-                      <AlertTriangle className="w-4 h-4 text-[#0098EA] shrink-0 mt-0.5" />
-                      <div className="text-[11.5px] leading-snug">
-                        <p className="font-extrabold text-[#0B1120]">
-                          Конкурент перебив вашу ціну:{' '}
-                          <span className="tabular-nums text-[#0077C8]">
-                            {formatTon(item.competitor_price ?? item.current_floor)} TON
-                          </span>
-                          !
-                        </p>
-                        <p className="text-[#334155] mt-0.5 tabular-nums">
-                          Рекомендовано знизити до{' '}
-                          <strong className="text-[#0B1120]">
-                            {formatTon(
-                              item.suggested_price ??
-                                Math.max(
-                                  item.min_price_guard,
-                                  (item.competitor_price ?? item.current_floor) - item.undercut_step,
-                                ),
-                            )}{' '}
-                            TON
-                          </strong>
-                        </p>
+                    <div className="grid grid-cols-2 gap-1.5 mt-2 text-[11px] tabular-nums">
+                      <div className="rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] px-2 py-1">
+                        <span className="block text-[9.5px] text-[#64748B] font-semibold">
+                          Ціна збереження
+                        </span>
+                        <span className="font-extrabold text-[#0B1120]">
+                          {formatTon(item.buy_price)} TON
+                        </span>
+                      </div>
+                      <div className="rounded-lg bg-[#F0F8FF] border border-[#BAE3FC] px-2 py-1">
+                        <span className="block text-[9.5px] text-[#0077C8] font-semibold">
+                          Живий флор
+                        </span>
+                        <span className="font-extrabold text-[#0077C8]">
+                          {formatTon(item.current_floor)} TON
+                        </span>
                       </div>
                     </div>
+                  </div>
+                </div>
 
+                <div className="flex items-center gap-1.5 pt-1 border-t border-[#F1F5F9]">
+                  <button
+                    type="button"
+                    disabled={isOpening}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleOpenFullscreen(item);
+                    }}
+                    className="flex-1 h-9 rounded-xl ton-btn-primary text-white text-[11px] font-extrabold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>{isOpening ? 'Відкриття...' : 'Відкрити на весь екран'}</span>
+                  </button>
+                  {tgNftUrl && (
                     <button
                       type="button"
-                      disabled={isBusy}
-                      onClick={() => handleApplyUndercut(item)}
-                      className="w-full h-9 rounded-xl ton-btn-primary text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        haptic('light');
+                        openExternalLink(tgNftUrl);
+                      }}
+                      className="h-9 px-3 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] border border-[#E2E8F0] hover:border-[#BAE3FC] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer transition-colors"
                     >
-                      <Zap className="w-3.5 h-3.5 fill-current" />
-                      <span className="tabular-nums">
-                        Знизити до{' '}
-                        {formatTon(
-                          item.suggested_price ??
-                            Math.max(
-                              item.min_price_guard,
-                              (item.competitor_price ?? item.current_floor) - item.undercut_step,
-                            ),
-                        )}{' '}
-                        TON
-                      </span>
+                      <span>TG</span>
+                      <ExternalLink className="w-3 h-3" />
                     </button>
-                  </div>
-                )}
-
-                {/* Thin Floor Protection Warning */}
-                {item.thin_floor_warning && (
-                  <div className="rounded-xl px-3 py-2 bg-[#F8FAFC] border border-[#E2E8F0] flex items-start gap-2">
-                    <Flame className="w-4 h-4 text-[#0098EA] shrink-0 mt-0.5" />
-                    <p className="text-[11px] font-semibold text-[#0B1120] leading-snug">
-                      {item.thin_floor_warning}
-                    </p>
-                  </div>
-                )}
-
-                {/* Best Market to Sell Advisor */}
-                {item.best_sell_market && item.best_sell_price > 0 && (
-                  <div className="rounded-xl px-3 py-2 bg-[#E8F5FE]/70 border border-[#BAE3FC] flex items-center justify-between text-[11px]">
-                    <span className="font-bold text-[#0B1120] inline-flex items-center gap-1.5">
-                      <TrendingUp className="w-3.5 h-3.5 text-[#0098EA]" />
-                      Вигідніше продати на {bestSellMeta.label}
-                    </span>
-                    <span className="font-extrabold text-[#0077C8] tabular-nums">
-                      ~{formatTon(item.best_sell_price)} TON
-                    </span>
-                  </div>
-                )}
-
-                {/* Smart Auto-Undercut Control Box */}
-                <div className="rounded-2xl p-3 bg-[#F4F7FB] border border-[#E2E8F0] space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
-                      <ShieldCheck className="w-4 h-4 text-[#0098EA]" />
-                      <span className="text-xs font-extrabold text-[#0B1120]">
-                        Smart Auto-Undercut
-                      </span>
-                    </div>
-
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() => handleToggleUndercut(item)}
-                      className={`w-10 h-5.5 rounded-full p-0.5 transition-colors cursor-pointer ${
-                        item.auto_undercut_enabled ? 'bg-[#0098EA]' : 'bg-[#CBD5E1]'
-                      }`}
-                    >
-                      <span
-                        className={`block w-4.5 h-4.5 rounded-full bg-white shadow-sm transition-transform ${
-                          item.auto_undercut_enabled ? 'translate-x-4.5' : 'translate-x-0'
-                        }`}
-                      />
-                    </button>
-                  </div>
-
-                  {/* Mode Selector */}
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() => handleModeChange(item, 'auto')}
-                      className={`py-1.5 rounded-xl text-[11px] font-bold border inline-flex items-center justify-center gap-1 cursor-pointer transition-colors ${
-                        item.undercut_mode === 'auto'
-                          ? 'bg-[#0098EA] text-white border-[#0098EA]'
-                          : 'bg-white text-[#0B1120] border-[#E2E8F0]'
-                      }`}
-                    >
-                      <Zap className="w-3 h-3" />
-                      <span>Авто (-{item.undercut_step})</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isBusy}
-                      onClick={() => handleModeChange(item, 'notify')}
-                      className={`py-1.5 rounded-xl text-[11px] font-bold border inline-flex items-center justify-center gap-1 cursor-pointer transition-colors ${
-                        item.undercut_mode === 'notify'
-                          ? 'bg-[#0077C8] text-white border-[#0077C8]'
-                          : 'bg-white text-[#0B1120] border-[#E2E8F0]'
-                      }`}
-                    >
-                      <Bell className="w-3 h-3" />
-                      <span>Сповіщати в ТГ</span>
-                    </button>
-                  </div>
-
-                  {/* Guard & Step Inputs */}
-                  <div className="grid grid-cols-12 gap-1.5 items-end text-[10.5px]">
-                    <div className="col-span-5">
-                      <label className="block font-bold text-[#64748B] mb-0.5">
-                        Мін. ціна (Захист)
-                      </label>
-                      <input
-                        type="number"
-                        step="0.1"
-                        value={draft.min_price_guard}
-                        onChange={(e) =>
-                          updateDraft(item.id, { min_price_guard: e.target.value }, item)
-                        }
-                        className="w-full h-8 px-2 rounded-lg bg-white border border-[#E2E8F0] font-bold text-[#0B1120] tabular-nums focus:outline-none focus:border-[#0098EA]"
-                      />
-                    </div>
-                    <div className="col-span-4">
-                      <label className="block font-bold text-[#64748B] mb-0.5">Крок (TON)</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={draft.undercut_step}
-                        onChange={(e) =>
-                          updateDraft(item.id, { undercut_step: e.target.value }, item)
-                        }
-                        className="w-full h-8 px-2 rounded-lg bg-white border border-[#E2E8F0] font-bold text-[#0B1120] tabular-nums focus:outline-none focus:border-[#0098EA]"
-                      />
-                    </div>
-                    <div className="col-span-3">
-                      <button
-                        type="button"
-                        disabled={isBusy}
-                        onClick={() => handleSaveGuard(item)}
-                        className="w-full h-8 rounded-lg bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] font-extrabold inline-flex items-center justify-center gap-0.5 cursor-pointer"
-                      >
-                        <Check className="w-3.5 h-3.5" />
-                        <span>Ок</span>
-                      </button>
-                    </div>
-                  </div>
+                  )}
                 </div>
               </div>
             );
@@ -563,17 +342,17 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
         </div>
       )}
 
-      {/* ADD NFT MODAL */}
+      {/* ADD SAVED NFT MODAL */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center md:p-6 bg-[#0B1120]/45 backdrop-blur-[2px] animate-fade-in">
           <div className="absolute inset-0" onClick={() => setShowAddModal(false)} />
           <form
-            onSubmit={handleAddItem}
-            className="relative z-10 w-full md:max-w-[500px] bg-white rounded-t-[28px] md:rounded-3xl p-4 sm:p-5 space-y-3 animate-sheet-up shadow-2xl border border-[#E2E8F0]"
+            onSubmit={handleAddNew}
+            className="relative z-10 w-full md:max-w-[460px] bg-white rounded-t-[28px] md:rounded-3xl p-4 sm:p-5 space-y-3 animate-sheet-up shadow-2xl border border-[#E2E8F0]"
           >
             <div className="flex items-center justify-between">
               <h3 className="font-display text-base font-extrabold text-[#0B1120]">
-                Додати NFT в портфель
+                Зберегти NFT в портфель
               </h3>
               <button
                 type="button"
@@ -590,7 +369,7 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
                 <select
                   value={newCollection}
                   onChange={(e) => setNewCollection(e.target.value)}
-                  className="w-full h-10 px-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold focus:outline-none focus:border-[#0098EA]"
+                  className="w-full h-10 px-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold text-[#0B1120] focus:outline-none focus:border-[#0098EA]"
                 >
                   {collections.map((c) => (
                     <option key={c.short_name} value={c.short_name}>
@@ -606,67 +385,48 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
                   <input
                     type="number"
                     required
+                    min="1"
                     value={newNumber}
                     onChange={(e) => setNewNumber(e.target.value)}
+                    placeholder="18718"
                     className="w-full h-10 px-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold tabular-nums focus:outline-none focus:border-[#0098EA]"
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-[#334155] mb-1">Маркет</label>
-                  <select
-                    value={newMarket}
-                    onChange={(e) => setNewMarket(e.target.value)}
-                    className="w-full h-10 px-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold focus:outline-none focus:border-[#0098EA]"
-                  >
-                    <option value="portals">Portals</option>
-                    <option value="getgems">Getgems</option>
-                    <option value="mrkt">MRKT</option>
-                    <option value="tonnel">Tonnel</option>
-                  </select>
+                  <label className="block font-bold text-[#334155] mb-1">Ціна (TON)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={newBuyPrice}
+                    onChange={(e) => setNewBuyPrice(e.target.value)}
+                    placeholder="Флор авто"
+                    className="w-full h-10 px-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold tabular-nums focus:outline-none focus:border-[#0098EA]"
+                  />
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2">
-                <div>
-                  <label className="block font-bold text-[#334155] mb-1">Купівля (TON)</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    required
-                    value={newBuyPrice}
-                    onChange={(e) => setNewBuyPrice(e.target.value)}
-                    className="w-full h-10 px-2.5 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold tabular-nums focus:outline-none focus:border-[#0098EA]"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-[#334155] mb-1">Лістинг (TON)</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={newListedPrice}
-                    onChange={(e) => setNewListedPrice(e.target.value)}
-                    className="w-full h-10 px-2.5 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold tabular-nums focus:outline-none focus:border-[#0098EA]"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-[#334155] mb-1">Захист (TON)</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={newMinGuard}
-                    onChange={(e) => setNewMinGuard(e.target.value)}
-                    className="w-full h-10 px-2.5 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold tabular-nums focus:outline-none focus:border-[#0098EA]"
-                  />
-                </div>
+              <div>
+                <label className="block font-bold text-[#334155] mb-1">Маркет</label>
+                <select
+                  value={newMarket}
+                  onChange={(e) => setNewMarket(e.target.value)}
+                  className="w-full h-10 px-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] font-bold text-[#0B1120] focus:outline-none focus:border-[#0098EA]"
+                >
+                  <option value="portals">Portals</option>
+                  <option value="getgems">Getgems</option>
+                  <option value="mrkt">MRKT</option>
+                  <option value="tonnel">Tonnel</option>
+                  <option value="fragment">Fragment</option>
+                </select>
               </div>
             </div>
 
             <button
               type="submit"
               disabled={savingNew}
-              className="w-full ton-btn-primary h-11 rounded-xl font-bold text-sm cursor-pointer disabled:opacity-60"
+              className="w-full h-11 rounded-full ton-btn-primary text-white text-sm font-extrabold cursor-pointer disabled:opacity-60"
             >
-              {savingNew ? 'Додавання...' : 'Додати в портфель'}
+              {savingNew ? 'Збереження...' : 'Зберегти в портфель'}
             </button>
           </form>
         </div>

@@ -1,14 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ArrowRight,
-  ArrowUpDown,
-  Eye,
-  Flame,
-  Hash,
+  Check,
+  ChevronDown,
   RefreshCw,
   Search,
   SlidersHorizontal,
-  Sparkles,
   TrendingUp,
 } from 'lucide-react';
 import { api } from '../api/client';
@@ -29,19 +26,12 @@ interface ScannerPageProps {
   onNotify: (title: string, message?: string, variant?: 'info' | 'success' | 'warning' | 'error') => void;
 }
 
-const MARKET_FILTERS = [
-  { key: 'all', label: 'Всі' },
+const MARKET_OPTIONS = [
   { key: 'portals', label: 'Portals' },
   { key: 'getgems', label: 'Getgems' },
   { key: 'mrkt', label: 'MRKT' },
   { key: 'tonnel', label: 'Tonnel' },
-];
-
-const DISCOUNT_FILTERS = [
-  { value: -100, label: 'Всі' },
-  { value: 5, label: '>5%' },
-  { value: 15, label: '>15%' },
-  { value: 25, label: '>25%' },
+  { key: 'fragment', label: 'Fragment' },
 ];
 
 type SortOption = 'discount_desc' | 'profit_desc' | 'visual_desc' | 'price_asc' | 'newest';
@@ -55,21 +45,22 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
 }) => {
   const [items, setItems] = useState<AnalyzedListing[]>([]);
   const [arbitrage, setArbitrage] = useState<ArbitrageOpportunity[]>([]);
-  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   // Filters
   const [searchText, setSearchText] = useState('');
   const [collection, setCollection] = useState('');
-  const [market, setMarket] = useState('all');
-  const [minDiscount, setMinDiscount] = useState(-100);
-  const [rareComboOnly, setRareComboOnly] = useState(false);
-  const [visualTopOnly, setVisualTopOnly] = useState(false);
-  const [niceNumberOnly, setNiceNumberOnly] = useState(false);
+  const [selectedMarkets, setSelectedMarkets] = useState<string[]>([]);
+  const [showMarketMenu, setShowMarketMenu] = useState(false);
   const [sort, setSort] = useState<SortOption>('discount_desc');
 
   const filteredItems = items.filter((item) => {
+    if (selectedMarkets.length > 0 && selectedMarkets.length < MARKET_OPTIONS.length) {
+      if (!selectedMarkets.includes(String(item.market).toLowerCase())) {
+        return false;
+      }
+    }
     if (searchText.trim()) {
       const q = searchText.trim().toLowerCase();
       const matchesText =
@@ -86,17 +77,19 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
     return true;
   });
 
+  const marketParam =
+    selectedMarkets.length > 0 && selectedMarkets.length < MARKET_OPTIONS.length
+      ? selectedMarkets.join(',')
+      : undefined;
+
   const fetchListings = useCallback(async () => {
     setLoading(true);
     try {
       const [listRes, arbRes] = await Promise.all([
         api.getScannerListings({
           collection: collection || undefined,
-          market: market === 'all' ? undefined : market,
-          min_discount: minDiscount,
-          rare_combo_only: rareComboOnly || undefined,
-          visual_top_only: visualTopOnly || undefined,
-          nice_number_only: niceNumberOnly || undefined,
+          market: marketParam,
+          min_discount: -100,
           sort,
           limit: 60,
         }),
@@ -104,7 +97,6 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
       ]);
 
       setItems(listRes.items || []);
-      setTotal(listRes.total ?? (listRes.items?.length || 0));
       const arbList =
         arbRes.opportunities && arbRes.opportunities.length > 0
           ? arbRes.opportunities
@@ -119,16 +111,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [
-    collection,
-    market,
-    minDiscount,
-    rareComboOnly,
-    visualTopOnly,
-    niceNumberOnly,
-    sort,
-    onNotify,
-  ]);
+  }, [collection, marketParam, sort, onNotify]);
 
   useEffect(() => {
     fetchListings();
@@ -155,17 +138,57 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
   const resetAllFilters = () => {
     setSearchText('');
     setCollection('');
-    setMarket('all');
-    setMinDiscount(-100);
-    setRareComboOnly(false);
-    setVisualTopOnly(false);
-    setNiceNumberOnly(false);
+    setSelectedMarkets([]);
+    setShowMarketMenu(false);
     setSort('discount_desc');
+  };
+
+  const toggleMarketChoice = (key: string) => {
+    haptic('light');
+    setSelectedMarkets((prev) => {
+      if (prev.includes(key)) {
+        return prev.filter((k) => k !== key);
+      }
+      const next = [...prev, key];
+      return next.length === MARKET_OPTIONS.length ? [] : next;
+    });
+  };
+
+  const marketButtonLabel = (() => {
+    if (selectedMarkets.length === 0 || selectedMarkets.length === MARKET_OPTIONS.length) {
+      return 'Маркет: Всі';
+    }
+    if (selectedMarkets.length <= 2) {
+      const labels = selectedMarkets.map(
+        (k) => MARKET_OPTIONS.find((m) => m.key === k)?.label || k,
+      );
+      return `Маркет: ${labels.join(', ')}`;
+    }
+    return `Маркет: ${selectedMarkets.length} обрано`;
+  })();
+
+  const handleClickArbitrage = async (opp: ArbitrageOpportunity) => {
+    haptic('light');
+    if (opp.listing) {
+      onSelectListing(opp.listing);
+      return;
+    }
+    try {
+      const query =
+        opp.tg_id ||
+        (opp.number ? `${opp.collection_name} #${opp.number}` : opp.collection_name);
+      const res = await api.runXRay(query);
+      if (res?.item) {
+        onSelectListing(res.item);
+      }
+    } catch {
+      setCollection(opp.short_name);
+    }
   };
 
   return (
     <div className="space-y-4 pb-4">
-      {/* Cross-Market Arbitrage Strip */}
+      {/* Cross-Market Arbitrage Strip (Real Specific NFTs) */}
       <section>
         <div className="flex items-center justify-between px-0.5 mb-2">
           <div className="flex items-center gap-1.5">
@@ -190,20 +213,19 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
             {arbitrage.slice(0, 10).map((opp) => {
               const buyMeta = getMarketMeta(opp.buy_market);
               const sellMeta = getMarketMeta(opp.sell_market);
+              const nftNumber = opp.number ?? opp.listing?.number;
+              const nftPhoto = opp.photo_url || opp.listing?.photo_url;
               return (
                 <button
                   key={opp.id}
                   type="button"
-                  onClick={() => {
-                    haptic('light');
-                    setCollection(opp.short_name);
-                  }}
-                  className="shrink-0 w-[238px] sm:w-[252px] text-left ton-card ton-card-hover rounded-2xl p-3 cursor-pointer"
+                  onClick={() => handleClickArbitrage(opp)}
+                  className="shrink-0 w-[244px] sm:w-[258px] text-left ton-card ton-card-hover rounded-2xl p-3 cursor-pointer"
                 >
                   <div className="flex items-center gap-2.5">
                     <div className="w-10 h-10 rounded-xl overflow-hidden bg-[#F4F7FB] border border-[#E2E8F0] shrink-0">
                       <NftImage
-                        src={opp.photo_url}
+                        src={nftPhoto}
                         alt={opp.collection_name}
                         className="w-full h-full object-cover"
                       />
@@ -211,9 +233,14 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
                     <div className="min-w-0 flex-1">
                       <p className="text-[12.5px] font-extrabold text-[#0B1120] truncate">
                         {opp.collection_name}
+                        {nftNumber ? ` #${nftNumber}` : ''}
                       </p>
-                      <span className="inline-block text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#E8F5FE] text-[#0077C8] mt-0.5">
-                        {opp.type === 'instant_offer' ? 'Миттєвий офер' : 'Флор-спред'}
+                      <span className="inline-block text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#E8F5FE] text-[#0077C8] mt-0.5 truncate max-w-full">
+                        {opp.model_name
+                          ? opp.model_name
+                          : opp.type === 'instant_offer'
+                            ? 'Миттєвий офер'
+                            : 'Реальний лот'}
                       </span>
                     </div>
                   </div>
@@ -257,180 +284,122 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
         )}
       </section>
 
-      {/* Responsive Filter Toolbar (Stacked on Mobile, Sleek Horizontal on Desktop) */}
+      {/* Filter Toolbar — Exact 4-Row User Layout */}
       <section className="ton-card rounded-2xl p-3 sm:p-3.5 space-y-2.5">
-        {/* Row 1: Search + Collection Select + Market Pills + Refresh */}
-        <div className="flex flex-col lg:flex-row lg:items-center gap-2">
-          {/* Instant Search Input */}
-          <div className="relative flex-1 min-w-0">
-            <Search className="w-3.5 h-3.5 text-[#64748B] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="text"
-              value={searchText}
-              onChange={(e) => setSearchText(e.target.value)}
-              placeholder="Пошук: колекція, модель, фон, монохром або #номер..."
-              className="w-full h-9 pl-8 pr-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] text-xs font-semibold text-[#0B1120] placeholder:text-[#64748B] focus:outline-none focus:border-[#0098EA] focus:bg-white transition-colors"
-            />
-          </div>
-
-          {/* Collection Select + Refresh */}
-          <div className="flex items-center gap-2 lg:w-auto">
-            <select
-              value={collection}
-              onChange={(e) => setCollection(e.target.value)}
-              className="flex-1 lg:w-[220px] h-9 pl-3 pr-7 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] text-xs font-bold text-[#0B1120] focus:outline-none focus:border-[#0098EA]"
-            >
-              <option value="">
-                {collections.length > 0 ? `Всі колекції (${collections.length})` : 'Всі колекції'}
-              </option>
-              {collections.map((c) => (
-                <option key={c.short_name} value={c.short_name}>
-                  {c.name} — {formatTon(c.floor_price)} TON
-                </option>
-              ))}
-            </select>
-
-            <button
-              type="button"
-              disabled={refreshing}
-              onClick={handleHardRefresh}
-              className="h-9 px-3 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 disabled:opacity-60"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-              <span>Оновити</span>
-            </button>
-          </div>
+        {/* Row 1: Instant Search Input */}
+        <div className="relative w-full">
+          <Search className="w-3.5 h-3.5 text-[#64748B] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <input
+            type="text"
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            placeholder="Пошук: колекція, модель, фон або #номер..."
+            className="w-full h-10 pl-8 pr-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] text-xs font-semibold text-[#0B1120] placeholder:text-[#64748B] focus:outline-none focus:border-[#0098EA] focus:bg-white transition-colors"
+          />
         </div>
 
-        {/* Row 2: Market Pills + Discount + Visual/Combo/NiceNumber Quick Filters */}
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-2">
-          {/* Market Pills */}
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-            {MARKET_FILTERS.map((m) => {
-              const active = market === m.key;
-              return (
-                <button
-                  key={m.key}
-                  type="button"
-                  onClick={() => {
-                    haptic('light');
-                    setMarket(m.key);
-                  }}
-                  className={`shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[11px] font-bold border transition-all cursor-pointer ${
-                    active
-                      ? 'bg-[#0098EA] text-white border-[#0098EA] shadow-xs'
-                      : 'bg-[#F8FAFC] text-[#0B1120] border-[#E2E8F0] hover:border-[#BAE3FC] hover:bg-[#E8F5FE]/60'
-                  }`}
-                >
-                  {m.key !== 'all' && (
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full ${
-                        active ? 'bg-white' : 'bg-[#0098EA]'
-                      }`}
-                    />
-                  )}
-                  <span>{m.label}</span>
-                </button>
-              );
-            })}
-          </div>
+        {/* Row 2: 50/50 Collection Select + BLACK Оновити Button */}
+        <div className="grid grid-cols-2 gap-2 w-full">
+          <select
+            value={collection}
+            onChange={(e) => setCollection(e.target.value)}
+            className="h-10 w-full px-3 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] text-xs font-bold text-[#0B1120] focus:outline-none focus:border-[#0098EA]"
+          >
+            <option value="">
+              {collections.length > 0 ? `Всі колекції (${collections.length})` : 'Всі колекції (124)'}
+            </option>
+            {collections.map((c) => (
+              <option key={c.short_name} value={c.short_name}>
+                {c.name} — {formatTon(c.floor_price)} TON
+              </option>
+            ))}
+          </select>
 
-          {/* Discount + Quick Visual/Combo/NiceNumber Toggles */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            <div className="flex items-center gap-1">
-              {DISCOUNT_FILTERS.map((d) => {
-                const active = minDiscount === d.value;
+          <button
+            type="button"
+            disabled={refreshing}
+            onClick={handleHardRefresh}
+            className="h-10 w-full rounded-xl bg-[#0B1120] hover:bg-[#1E293B] text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60 transition-colors"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <span>Оновити</span>
+          </button>
+        </div>
+
+        {/* Row 3: Full-Width BLACK Multi-Select "Маркет" Button */}
+        <div className="w-full relative">
+          <button
+            type="button"
+            onClick={() => {
+              haptic('light');
+              setShowMarketMenu((v) => !v);
+            }}
+            className="h-10 w-full rounded-xl bg-[#0B1120] hover:bg-[#1E293B] text-white text-xs font-bold flex items-center justify-between px-3.5 cursor-pointer transition-colors"
+          >
+            <span>{marketButtonLabel}</span>
+            <ChevronDown
+              className={`w-4 h-4 transition-transform ${showMarketMenu ? 'rotate-180' : ''}`}
+            />
+          </button>
+
+          {showMarketMenu && (
+            <div className="w-full mt-1.5 p-2 rounded-xl bg-white border border-[#E2E8F0] shadow-lg grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  haptic('light');
+                  setSelectedMarkets([]);
+                }}
+                className={`h-9 px-2.5 rounded-lg text-xs font-bold border flex items-center justify-between cursor-pointer transition-colors ${
+                  selectedMarkets.length === 0
+                    ? 'bg-[#0B1120] text-white border-[#0B1120]'
+                    : 'bg-[#F8FAFC] text-[#0B1120] border-[#E2E8F0] hover:border-[#BAE3FC]'
+                }`}
+              >
+                <span>Всі</span>
+                {selectedMarkets.length === 0 && <Check className="w-3.5 h-3.5" />}
+              </button>
+
+              {MARKET_OPTIONS.map((m) => {
+                const isSelected = selectedMarkets.includes(m.key);
                 return (
                   <button
-                    key={d.value}
+                    key={m.key}
                     type="button"
-                    onClick={() => setMinDiscount(d.value)}
-                    className={`px-2 py-1 rounded-lg text-[10.5px] font-bold tabular-nums cursor-pointer border transition-colors ${
-                      active
-                        ? 'bg-[#0098EA] text-white border-[#0098EA]'
-                        : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#334155] hover:border-[#BAE3FC]'
+                    onClick={() => toggleMarketChoice(m.key)}
+                    className={`h-9 px-2.5 rounded-lg text-xs font-bold border flex items-center justify-between cursor-pointer transition-colors ${
+                      isSelected
+                        ? 'bg-[#0B1120] text-white border-[#0B1120]'
+                        : 'bg-[#F8FAFC] text-[#0B1120] border-[#E2E8F0] hover:border-[#BAE3FC]'
                     }`}
                   >
-                    {d.label}
+                    <span>{m.label}</span>
+                    {isSelected && <Check className="w-3.5 h-3.5" />}
                   </button>
                 );
               })}
             </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                haptic('light');
-                setRareComboOnly((v) => !v);
-              }}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10.5px] font-bold border transition-all cursor-pointer ${
-                rareComboOnly
-                  ? 'bg-[#0098EA] text-white border-[#0098EA] shadow-xs'
-                  : 'bg-[#F8FAFC] text-[#334155] border-[#E2E8F0] hover:border-[#BAE3FC]'
-              }`}
-            >
-              <Sparkles className="w-3 h-3" />
-              <span>Тільки Комбо</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                haptic('light');
-                setVisualTopOnly((v) => !v);
-              }}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10.5px] font-bold border transition-all cursor-pointer ${
-                visualTopOnly
-                  ? 'bg-[#0098EA] text-white border-[#0098EA] shadow-xs'
-                  : 'bg-[#F8FAFC] text-[#334155] border-[#E2E8F0] hover:border-[#BAE3FC]'
-              }`}
-            >
-              <Eye className="w-3 h-3" />
-              <span>Топ візуал (8+)</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                haptic('light');
-                setNiceNumberOnly((v) => !v);
-              }}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10.5px] font-bold border transition-all cursor-pointer ${
-                niceNumberOnly
-                  ? 'bg-[#0098EA] text-white border-[#0098EA] shadow-xs'
-                  : 'bg-[#F8FAFC] text-[#334155] border-[#E2E8F0] hover:border-[#BAE3FC]'
-              }`}
-            >
-              <Hash className="w-3 h-3" />
-              <span>Красиві номери</span>
-            </button>
-          </div>
+          )}
         </div>
 
-        {/* Row 3: Counter & Sort */}
-        <div className="flex items-center justify-between pt-2 border-t border-[#F1F5F9]">
-          <div className="flex items-center gap-1.5 text-[11px] text-[#64748B] font-semibold">
-            <Flame className="w-3.5 h-3.5 text-[#0098EA]" />
-            <span>
-              Знайдено:{' '}
-              <strong className="text-[#0B1120] tabular-nums">
-                {searchText.trim() ? filteredItems.length : total}
-              </strong>{' '}
-              лотів
+        {/* Row 4: 50/50 Count + Vertical Divider + BLACK Sort Selector */}
+        <div className="grid grid-cols-2 items-center pt-2.5 border-t border-[#E2E8F0] divide-x divide-[#CBD5E1]">
+          <div className="pr-3 flex items-center justify-center">
+            <span className="text-xs font-extrabold text-[#0B1120] tabular-nums">
+              {filteredItems.length} лотів
             </span>
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <ArrowUpDown className="w-3.5 h-3.5 text-[#64748B]" />
+          <div className="pl-3">
             <select
               value={sort}
               onChange={(e) => setSort(e.target.value as SortOption)}
-              className="text-[11.5px] font-bold text-[#0077C8] bg-[#E8F5FE] border border-[#BAE3FC] px-2.5 py-1 rounded-lg focus:outline-none cursor-pointer"
+              className="h-9 w-full px-3 rounded-xl bg-[#0B1120] text-white text-xs font-bold focus:outline-none cursor-pointer"
             >
-              <option value="discount_desc">Вигода ↓</option>
-              <option value="profit_desc">Профіт ↓</option>
-              <option value="visual_desc">Топ візуал ↓</option>
-              <option value="price_asc">Ціна ↑</option>
+              <option value="discount_desc">Вигода</option>
+              <option value="visual_desc">Топ візуал</option>
+              <option value="profit_desc">Профіт TON</option>
+              <option value="price_asc">Дешевші</option>
               <option value="newest">Нові</option>
             </select>
           </div>
