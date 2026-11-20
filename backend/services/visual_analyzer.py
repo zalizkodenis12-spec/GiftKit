@@ -29,21 +29,11 @@ from backend.config import runtime_config
 PREMIUM_BACKDROPS: dict[str, str] = {
     "onyx black": "Onyx Black",
     "black": "Black",
-    "midnight blue": "Midnight Blue",
     "obsidian": "Obsidian",
-    "pure gold": "Pure Gold",
-    "satin gold": "Satin Gold",
-    "old gold": "Old Gold",
-    "platinum": "Platinum",
-    "roman silver": "Roman Silver",
-    "steel grey": "Steel Grey",
-    "steel gray": "Steel Grey",
-    "gunmetal": "Gunmetal",
 }
 
 _BLACK_KW = {
-    "black", "onyx", "midnight", "obsidian", "noir", "shadow", "dark",
-    "coal", "void", "eclipse", "phantom", "charcoal", "ebony", "gunmetal",
+    "black", "onyx", "obsidian", "noir", "coal", "void", "eclipse", "ebony",
 }
 _GOLD_KW = {
     "gold", "golden", "amber", "yellow", "honey", "brass", "champagne",
@@ -51,7 +41,7 @@ _GOLD_KW = {
 }
 _WHITE_SILVER_KW = {
     "white", "silver", "platinum", "pearl", "ivory", "chrome", "diamond",
-    "frost", "snow", "moon", "steel", "crystal", "marble", "roman silver",
+    "frost", "snow", "moon", "crystal", "marble",
 }
 _GREEN_KW = {
     "green", "emerald", "pine", "forest", "jade", "hunter", "olive",
@@ -234,17 +224,24 @@ def analyze_number_pattern(number: int) -> dict[str, Any]:
     elif m_abab and m_abab.group(1) != m_abab.group(2):
         matches.append(("Блок ABAB", 11.0))
     else:
-        # AABCC / ABBCC / AABBC / embedded AABB like #33755 or #14488
-        m_aabcc = re.search(r"(\d)\1\d(\d)\2", s)
-        m_pair_pair = re.search(r"(\d)\1(\d)\2", s)
-        if m_aabcc and m_aabcc.group(1) != m_aabcc.group(2):
+        # Strict fullmatch on AABCC (#33755) or AAABB (#77722) — never partial search on #19911
+        m_aabcc = re.fullmatch(r"(\d)\1(\d)(\d)\3", s)
+        m_aaabb = re.fullmatch(r"(\d)\1\1(\d)\2", s)
+        if m_aabcc and m_aabcc.group(1) != m_aabcc.group(3) and m_aabcc.group(1) != m_aabcc.group(2) and m_aabcc.group(2) != m_aabcc.group(3):
             matches.append(("Красивий блок", 9.0))
-        elif m_pair_pair and m_pair_pair.group(1) != m_pair_pair.group(2):
+        elif m_aaabb and m_aaabb.group(1) != m_aaabb.group(2):
             matches.append(("Красивий блок", 9.0))
 
-    # 7. Only 2 distinct digits in a 5+ digit number (e.g. #70707, #81881, #22020)
+    # 7. Clean 2-digit numbers in 5+ digits: ONLY when symmetric/alternating (ABABA, AABAA, ABBBA) or ending with 000
     if len(s) >= 5 and len(set(s)) == 2:
-        matches.append(("2-цифровий номер", 11.0))
+        is_clean_two_digit = (
+            s == s[::-1]
+            or s.endswith("000")
+            or bool(re.fullmatch(r"(\d)(\d)\1\2\1", s))
+            or bool(re.fullmatch(r"(\d)\1\1(\d)\2|(\d)\3(\d)\4\4", s))
+        )
+        if is_clean_two_digit:
+            matches.append(("2-цифровий номер", 11.0))
 
     # 8. Clean round numbers (1000, 5000, 12000, 500, 1500)
     if number >= 1000 and number % 1000 == 0:
@@ -331,15 +328,15 @@ def _classify_hsv_bucket(rgb: tuple[int, int, int]) -> set[str]:
     h, s, v = colorsys.rgb_to_hsv(rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
     h_deg = h * 360.0
     tags: set[str] = set()
-    if v < 0.24 or (v < 0.30 and s < 0.28):
+    if v <= 0.16 or (v <= 0.20 and s <= 0.20):
         tags.add("black")
     if s < 0.17 and v >= 0.66:
         tags.add("white_silver")
-    if 30.0 <= h_deg <= 58.0 and s >= 0.32 and v >= 0.44:
+    if 30.0 <= h_deg <= 58.0 and s >= 0.34 and v >= 0.46:
         tags.add("gold")
     if 95.0 <= h_deg <= 165.0 and s >= 0.24 and v <= 0.62:
         tags.add("green")
-    if 250.0 <= h_deg <= 320.0 and s >= 0.22:
+    if 250.0 <= h_deg <= 320.0 and s >= 0.24:
         tags.add("purple")
     if 172.0 <= h_deg <= 240.0 and s >= 0.42 and v >= 0.50:
         tags.add("neon_blue")
@@ -390,37 +387,19 @@ def _check_luxury_whitelist(
     fg_buckets: set[str],
     backdrop_name: str,
 ) -> tuple[str | None, float]:
-    """Evaluate luxury contrast whitelist from combined pixel & attribute buckets."""
-    # Black + Gold (either direction)
-    if ("black" in bg_buckets and "gold" in fg_buckets) or (
-        "gold" in bg_buckets and "black" in fg_buckets
-    ):
+    """Evaluate luxury contrast whitelist strictly requiring matching FG + BG pairs."""
+    _ = backdrop_name
+    # Black backdrop + Gold foreground
+    if "black" in bg_buckets and "gold" in fg_buckets:
         return "Чорний + Золото", 14.0
 
-    # Black + White/Silver
-    if ("black" in bg_buckets and "white_silver" in fg_buckets) or (
-        "white_silver" in bg_buckets and "black" in fg_buckets
-    ):
+    # Black backdrop + White/Silver foreground
+    if "black" in bg_buckets and "white_silver" in fg_buckets:
         return "Чорний + Білий", 12.0
 
-    # Dark Green + Gold/Silver
-    if ("green" in bg_buckets and ("gold" in fg_buckets or "white_silver" in fg_buckets)) or (
-        "green" in fg_buckets and ("gold" in bg_buckets or "white_silver" in bg_buckets)
-    ):
-        return "Зелений + Золото", 10.0
-
-    # Purple/Dark + Neon/Cyan/Blue
-    if (("purple" in bg_buckets or "black" in bg_buckets) and "neon_blue" in fg_buckets) or (
-        "purple" in fg_buckets and "neon_blue" in bg_buckets
-    ):
+    # Dark/Purple backdrop + Neon/Cyan/Blue foreground
+    if ("purple" in bg_buckets or "black" in bg_buckets) and "neon_blue" in fg_buckets:
         return "Фіолетовий + Неон", 10.0
-
-    # Popular premium backdrops
-    bg_low = backdrop_name.strip().lower()
-    if bg_low:
-        for key, display in PREMIUM_BACKDROPS.items():
-            if key == bg_low or key in bg_low:
-                return f"Топ фон: {display}", 9.0
 
     return None, 0.0
 
@@ -552,37 +531,49 @@ def _analyze_image_bytes_sync(image_bytes: bytes, attributes: list[Any] | None =
 
     # STRICT PIXEL-WIDE MONOCHROME DETECTOR:
     # Checks ALL foreground object pixels so multicolored objects (e.g. brown+green cookie on blue bg)
-    # are NEVER falsely tagged as Monochrome!
+    # and grey/muddy backdrops are NEVER falsely tagged as Monochrome!
     total_obj = max(len(obj_pixels), 1)
     same_hue_px = 0
+    same_hue_colored_px = 0
     achromatic_px = 0
     clashing_color_px = 0
     for r, g, b in obj_pixels:
         ph, ps, pv = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
         p_hue_diff = _hue_diff_degrees(ph, bg_h)
-        if ps <= 0.18 or pv <= 0.16:
+        if ps <= 0.16 or pv <= 0.16:
             achromatic_px += 1
             same_hue_px += 1  # neutral white/black highlights/shadows don't break monochrome
-        elif p_hue_diff <= 18.0:
+        elif p_hue_diff <= 16.0 and ps >= 0.20:
             same_hue_px += 1
-        elif p_hue_diff > 30.0 and ps >= 0.24:
+            same_hue_colored_px += 1
+        elif p_hue_diff > 24.0 and ps >= 0.20:
             clashing_color_px += 1
 
-    same_hue_ratio = same_hue_px / total_obj
+    same_hue_colored_ratio = same_hue_colored_px / total_obj
     achromatic_ratio = achromatic_px / total_obj
     clashing_ratio = clashing_color_px / total_obj
 
-    bg_is_achromatic = bg_s <= 0.15 or bg_v <= 0.16
-    # Case 1: True Black/White/Grey Monochrome (neutral bg + >=82% neutral object)
-    is_achromatic_mono = bg_is_achromatic and achromatic_ratio >= 0.82 and clashing_ratio <= 0.08
-    # Case 2: True Same-Color Monochrome (colored bg + >=75% same hue + <=10% other colors + distinct fg)
+    bg_low = backdrop_name.strip().lower()
+    is_grey_or_muddy_bg = (0.15 < bg_v and bg_s < 0.30)
+    is_pitch_black_bg = (bg_v <= 0.15) or (bg_low in {"black", "onyx black", "obsidian"} and bg_v <= 0.22)
+
+    # Case 1: True Pitch-Black Achromatic Monochrome (pitch-black bg + >=86% achromatic object + <=5% clashing)
+    is_achromatic_mono = (
+        not is_grey_or_muddy_bg
+        and is_pitch_black_bg
+        and achromatic_ratio >= 0.86
+        and clashing_ratio <= 0.05
+    )
+
+    # Case 2: True Same-Color Monochrome (saturated colored bg + saturated same-hue fg + >=75% same-hue colored pixels + <=6% clashing)
     is_color_mono = (
-        not bg_is_achromatic
-        and bg_s >= 0.18
-        and same_hue_ratio >= 0.75
-        and clashing_ratio <= 0.10
-        and achromatic_ratio < 0.75
-        and hue_diff <= 20.0
+        not is_grey_or_muddy_bg
+        and bg_s >= 0.30
+        and bg_v >= 0.22
+        and fg_s >= 0.24
+        and hue_diff <= 15.0
+        and same_hue_colored_ratio >= 0.75
+        and clashing_ratio <= 0.06
     )
     is_monochrome = is_achromatic_mono or is_color_mono
 
@@ -607,11 +598,12 @@ def _analyze_image_bytes_sync(image_bytes: bytes, attributes: list[Any] | None =
         harmony_label = whitelist_label
         harmony_bonus = whitelist_bonus
 
-    # Clashing loud neon check
+    # Clashing loud neon or mismatched saturated color check (e.g. blue book on green backdrop)
     is_clashing_neon = (
-        fg_s > 0.65
-        and bg_s > 0.65
-        and 70.0 <= hue_diff <= 165.0
+        (
+            (fg_s > 0.65 and bg_s > 0.65 and 70.0 <= hue_diff <= 165.0)
+            or (fg_s >= 0.35 and bg_s >= 0.30 and hue_diff >= 45.0 and clashing_ratio >= 0.35)
+        )
         and not is_monochrome
         and whitelist_bonus == 0.0
     )
@@ -640,13 +632,18 @@ def _analyze_image_bytes_sync(image_bytes: bytes, attributes: list[Any] | None =
 
     # Saturation balance & multi-color mismatch penalty
     avg_sat = (fg_s + bg_s) / 2.0
-    if 0.12 <= avg_sat <= 0.66:
+    if is_clashing_neon:
+        score -= 1.6
+    elif 0.12 <= avg_sat <= 0.66:
         score += 0.25
-    elif is_clashing_neon:
-        score -= 1.9
 
-    if not is_monochrome and harmony_bonus == 0.0 and clashing_ratio >= 0.45:
-        score -= 0.45
+    if not is_monochrome and harmony_bonus == 0.0:
+        if clashing_ratio >= 0.45:
+            score -= 0.75
+        elif clashing_ratio >= 0.25:
+            score -= 0.4
+        if is_grey_or_muddy_bg:
+            score -= 0.4
 
     if lum_diff < 0.12 and is_clashing_neon:
         score -= 0.7
@@ -678,6 +675,7 @@ def _analyze_image_bytes_sync(image_bytes: bytes, attributes: list[Any] | None =
         "metrics": {
             "luminance_contrast": round(lum_diff, 3),
             "hue_diff_deg": round(hue_diff, 1),
+            "clashing_ratio": round(clashing_ratio, 3),
             "bg_hex": _rgb_to_hex(bg_rgb),
             "fg_hex": _rgb_to_hex(fg_rgb),
         },

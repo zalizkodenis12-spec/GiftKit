@@ -19,6 +19,7 @@ import type {
   TradeExecuteResponse,
   TrendsResponse,
   UserOffer,
+  UserProfile,
   VisionScorePayload,
   VisionScoreResponse,
   WhalesResponse,
@@ -26,14 +27,191 @@ import type {
 } from '../types/api';
 
 const API_BASE = '/api';
+const SESSION_TOKEN_KEY = 'giftkit_session_token';
+const STATE_ENVELOPE_KEY = 'giftkit_state_envelope';
+const CLOUD_STATE_KEY = 'gk_state_v1';
+
+let capturedUrlTgAuth: string | undefined;
+
+function extractInitialUrlAuth(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const url = new URL(window.location.href);
+    const tgAuth = url.searchParams.get('tg_auth');
+    if (tgAuth) {
+      capturedUrlTgAuth = tgAuth;
+      localStorage.setItem(SESSION_TOKEN_KEY, tgAuth);
+      url.searchParams.delete('tg_auth');
+      const nextSearch = url.searchParams.toString();
+      const nextUrl = `${url.pathname}${nextSearch ? `?${nextSearch}` : ''}${url.hash}`;
+      window.history.replaceState({}, '', nextUrl);
+    }
+  } catch {
+    // ignore URL parse issues
+  }
+}
+
+extractInitialUrlAuth();
+
+export function getCapturedTgAuth(): string | undefined {
+  return capturedUrlTgAuth;
+}
+
+export function getSessionToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return localStorage.getItem(SESSION_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function saveSessionToken(token?: string | null): void {
+  if (!token || typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(SESSION_TOKEN_KEY, token);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function getStoredStateEnvelope(): unknown | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(STATE_ENVELOPE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+export function saveStateEnvelope(envelope: unknown): void {
+  if (!envelope || typeof window === 'undefined') return;
+  try {
+    const serialized =
+      typeof envelope === 'string' ? envelope : JSON.stringify(envelope);
+    localStorage.setItem(STATE_ENVELOPE_KEY, serialized);
+    const cloud = window.Telegram?.WebApp?.CloudStorage;
+    if (cloud && typeof cloud.setItem === 'function') {
+      // CloudStorage has 4096 bytes limit per key; guard with try/catch
+      if (serialized.length <= 4000) {
+        cloud.setItem(CLOUD_STATE_KEY, serialized, () => {});
+      }
+    }
+  } catch {
+    // ignore CloudStorage / localStorage errors
+  }
+}
+
+export async function resolveInitialStateEnvelope(): Promise<unknown | null> {
+  const localEnv = getStoredStateEnvelope();
+  if (typeof window === 'undefined') return localEnv;
+  try {
+    const cloud = window.Telegram?.WebApp?.CloudStorage;
+    if (!cloud || typeof cloud.getItem !== 'function') {
+      return localEnv;
+    }
+    return await new Promise<unknown | null>((resolve) => {
+      let settled = false;
+      const timer = window.setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve(localEnv);
+        }
+      }, 900);
+
+      try {
+        cloud.getItem(CLOUD_STATE_KEY, (err, val) => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timer);
+          if (!err && val) {
+            try {
+              const parsed = JSON.parse(val);
+              if (!localEnv) {
+                localStorage.setItem(STATE_ENVELOPE_KEY, val);
+                resolve(parsed);
+                return;
+              }
+              const localTs = Number((localEnv as { updated_at?: number })?.updated_at || 0);
+              const cloudTs = Number((parsed as { updated_at?: number })?.updated_at || 0);
+              if (cloudTs > localTs) {
+                localStorage.setItem(STATE_ENVELOPE_KEY, val);
+                resolve(parsed);
+                return;
+              }
+            } catch {
+              // ignore malformed cloud state
+            }
+          }
+          resolve(localEnv);
+        });
+      } catch {
+        if (!settled) {
+          settled = true;
+          window.clearTimeout(timer);
+          resolve(localEnv);
+        }
+      }
+    });
+  } catch {
+    return localEnv;
+  }
+}
+
+function toAsciiJsonHeader(value: unknown): string {
+  const json = typeof value === 'string' ? value : JSON.stringify(value);
+  return json.replace(/[\u007F-\uFFFF]/g, (chr) => {
+    return '\\u' + ('0000' + chr.charCodeAt(0).toString(16)).slice(-4);
+  });
+}
+
+function shouldAttachStateHeader(path: string): boolean {
+  return (
+    path.startsWith('/sniper') ||
+    path.startsWith('/offers') ||
+    path.startsWith('/portfolio') ||
+    path.startsWith('/auth') ||
+    path.startsWith('/trade') ||
+    path.startsWith('/overview')
+  );
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...((init?.headers as Record<string, string>) || {}),
+  };
+
+  const sessionToken = getSessionToken();
+  if (sessionToken) {
+    headers['Authorization'] = `Bearer ${sessionToken}`;
+  }
+
+  try {
+    const tgInitData = window.Telegram?.WebApp?.initData;
+    if (tgInitData) {
+      headers['X-Telegram-Init-Data'] = tgInitData;
+    }
+  } catch {
+    // ignore outside Telegram
+  }
+
+  if (shouldAttachStateHeader(path)) {
+    const env = getStoredStateEnvelope();
+    if (env) {
+      try {
+        headers['X-GiftKit-State'] = toAsciiJsonHeader(env);
+      } catch {
+        // ignore serialization error
+      }
+    }
+  }
+
   const res = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
+    headers,
   });
 
   if (!res.ok) {
@@ -51,7 +229,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(detail);
   }
 
-  return res.json() as Promise<T>;
+  const resData = await res.json();
+  if (resData && typeof resData === 'object') {
+    if ('state_envelope' in resData && resData.state_envelope) {
+      saveStateEnvelope(resData.state_envelope);
+    }
+    if ('session_token' in resData && typeof resData.session_token === 'string') {
+      saveSessionToken(resData.session_token);
+    }
+  }
+
+  return resData as T;
 }
 
 function toQuery(params: Record<string, string | number | boolean | undefined | null>): string {
@@ -66,6 +254,37 @@ function toQuery(params: Record<string, string | number | boolean | undefined | 
 }
 
 export const api = {
+  // 0. Multi-User Telegram Auth & Cloud State Sync
+  initAuthSession: (payload: {
+    init_data?: string;
+    tg_auth?: string;
+    state_envelope?: unknown;
+  }) =>
+    request<{
+      ok: boolean;
+      authenticated: boolean;
+      user: UserProfile;
+      session_token?: string;
+      state_envelope?: unknown;
+    }>('/auth/session', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  createLoginCode: () =>
+    request<{ ok: boolean; nonce: string; bot_login_url: string }>('/auth/login-code', {
+      method: 'POST',
+    }),
+
+  pollLoginCode: (nonce: string) =>
+    request<{
+      ok: boolean;
+      ready: boolean;
+      user?: UserProfile;
+      session_token?: string;
+      state_envelope?: unknown;
+    }>(`/auth/poll-login?nonce=${encodeURIComponent(nonce)}`),
+
   // 1. System & Overview
   getOverview: () => request<OverviewResponse>('/overview'),
 

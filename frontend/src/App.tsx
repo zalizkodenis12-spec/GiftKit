@@ -1,5 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { api, useLiveSocket } from './api/client';
+import {
+  api,
+  getCapturedTgAuth,
+  resolveInitialStateEnvelope,
+  useLiveSocket,
+} from './api/client';
 import type {
   AnalyzedListing,
   CollectionSummary,
@@ -9,6 +14,7 @@ import type {
   SaleRecord,
   TabKey,
   ToastItem,
+  UserProfile,
   XRayResponse,
 } from './types/api';
 import { TopHeader } from './components/TopHeader';
@@ -23,6 +29,19 @@ import { MarketsPage } from './pages/MarketsPage';
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>('scanner');
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(() => {
+    const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
+    if (tgUser?.id) {
+      return {
+        tg_user_id: String(tgUser.id),
+        username: tgUser.username,
+        first_name: tgUser.first_name,
+        last_name: tgUser.last_name,
+        photo_url: tgUser.photo_url,
+      };
+    }
+    return null;
+  });
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
   const [collections, setCollections] = useState<CollectionSummary[]>([]);
   const [portfolio, setPortfolio] = useState<PortfolioResponse | null>(null);
@@ -109,9 +128,69 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    loadOverview();
-    loadCollections();
-    loadPortfolio();
+    let mounted = true;
+
+    const bootSessionAndDeepLink = async () => {
+      try {
+        const storedEnvelope = await resolveInitialStateEnvelope();
+        const initData = window.Telegram?.WebApp?.initData || '';
+        const urlTgAuth = getCapturedTgAuth();
+        const authRes = await api.initAuthSession({
+          init_data: initData,
+          tg_auth: urlTgAuth,
+          state_envelope: storedEnvelope,
+        });
+        if (mounted && authRes?.user) {
+          setUserProfile(authRes.user);
+        }
+      } catch {
+        // Fallback if offline
+      }
+
+      if (!mounted) return;
+      loadOverview();
+      loadCollections();
+      loadPortfolio();
+      setRefreshTick((t) => t + 1);
+
+      // Deep-Link to Exact NFT (?nft=... or ?listing_id=... or Telegram start_param)
+      try {
+        const sp = new URLSearchParams(window.location.search);
+        const startParam = window.Telegram?.WebApp?.initDataUnsafe?.start_param || '';
+        const parsedStartNft = startParam.startsWith('nft_')
+          ? startParam.slice(4)
+          : startParam;
+        const nftParam =
+          sp.get('nft') || sp.get('listing_id') || (parsedStartNft ? parsedStartNft : null);
+
+        if (nftParam) {
+          const cleanUrl = new URL(window.location.href);
+          cleanUrl.searchParams.delete('nft');
+          cleanUrl.searchParams.delete('listing_id');
+          const nextSearch = cleanUrl.searchParams.toString();
+          window.history.replaceState(
+            {},
+            '',
+            `${cleanUrl.pathname}${nextSearch ? `?${nextSearch}` : ''}${cleanUrl.hash}`,
+          );
+
+          const xrayRes = await api.runXRay(nftParam);
+          if (mounted && xrayRes?.item) {
+            setDrawerItem(xrayRes.item);
+            setDrawerRec(xrayRes.recommendation);
+            setDrawerSales(xrayRes.comparable_sales);
+          }
+        }
+      } catch {
+        // Ignore deep-link lookup failure
+      }
+    };
+
+    bootSessionAndDeepLink();
+
+    return () => {
+      mounted = false;
+    };
   }, [loadOverview, loadCollections, loadPortfolio]);
 
   // Live WebSocket subscription
@@ -283,6 +362,7 @@ export const App: React.FC = () => {
 
       <TopHeader
         overview={overview}
+        userProfile={userProfile}
         wsConnected={wsConnected}
         activeTab={activeTab}
         undercutCount={undercutCount}
@@ -292,6 +372,7 @@ export const App: React.FC = () => {
           setFocusXRayTrigger((n) => n + 1);
         }}
         onOpenMarkets={() => setActiveTab('markets')}
+        onOpenProfile={() => setActiveTab('markets')}
         onNotify={notify}
       />
 
@@ -342,6 +423,13 @@ export const App: React.FC = () => {
         {activeTab === 'markets' && (
           <MarketsPage
             overview={overview}
+            userProfile={userProfile}
+            onUserSynced={(user) => {
+              setUserProfile(user);
+              loadOverview();
+              loadPortfolio();
+              setRefreshTick((t) => t + 1);
+            }}
             onSettingsSaved={loadOverview}
             onNotify={notify}
           />

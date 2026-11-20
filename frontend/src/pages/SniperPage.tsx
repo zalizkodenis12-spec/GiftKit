@@ -2,8 +2,10 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   Bell,
   Crosshair,
+  Eye,
   ExternalLink,
   Plus,
+  RefreshCw,
   Send,
   ShoppingCart,
   Sparkles,
@@ -36,6 +38,27 @@ type SubTab = 'rules' | 'offers' | 'alerts';
 
 const ALL_MARKETS = ['portals', 'getgems', 'mrkt', 'tonnel'];
 
+function getMarketCollectionUrl(
+  market?: string,
+  shortName?: string,
+  collectionName?: string,
+  explicitUrl?: string,
+): string {
+  if (explicitUrl) return explicitUrl;
+  const m = (market || 'portals').toLowerCase();
+  const query = encodeURIComponent(collectionName || shortName || '');
+  if (m === 'getgems') {
+    return `https://getgems.io/search?q=${query}`;
+  }
+  if (m === 'mrkt') {
+    return 'https://t.me/mrkt';
+  }
+  if (m === 'tonnel') {
+    return 'https://t.me/tonnel_network_bot';
+  }
+  return 'https://portal-market.com';
+}
+
 export const SniperPage: React.FC<SniperPageProps> = ({
   collections,
   refreshTick,
@@ -50,6 +73,7 @@ export const SniperPage: React.FC<SniperPageProps> = ({
   const [radar, setRadar] = useState<OfferRadarItem[]>([]);
   const [alerts, setAlerts] = useState<AlertLog[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshingRadar, setRefreshingRadar] = useState(false);
 
   // Test TG Preview
   const [testingAlert, setTestingAlert] = useState(false);
@@ -104,16 +128,31 @@ export const SniperPage: React.FC<SniperPageProps> = ({
   const handleToggleRule = async (rule: SniperRule) => {
     haptic('light');
     const next = !rule.enabled;
-    setRules((prev) => prev.map((r) => (r.id === rule.id ? { ...r, enabled: next } : r)));
+    setRules((prev) =>
+      prev.map((r) => (String(r.id) === String(rule.id) ? { ...r, enabled: next } : r)),
+    );
     try {
-      await api.updateSniperRule(rule.id, { enabled: next });
+      const res = await api.updateSniperRule(rule.id, { enabled: next });
+      const serverRule =
+        res?.rule || (res && 'id' in res && res.id !== undefined ? (res as SniperRule) : null);
+      setRules((prev) =>
+        prev.map((r) =>
+          String(r.id) === String(rule.id)
+            ? serverRule
+              ? { ...r, ...serverRule, enabled: next }
+              : { ...r, enabled: next }
+            : r,
+        ),
+      );
       onNotify(
         next ? 'Правило активовано' : 'Правило призупинено',
         rule.name,
         next ? 'success' : 'info',
       );
     } catch {
-      setRules((prev) => prev.map((r) => (r.id === rule.id ? { ...r, enabled: !next } : r)));
+      setRules((prev) =>
+        prev.map((r) => (String(r.id) === String(rule.id) ? { ...r, enabled: !next } : r)),
+      );
       onNotify('Помилка оновлення правила', undefined, 'error');
     }
   };
@@ -122,7 +161,7 @@ export const SniperPage: React.FC<SniperPageProps> = ({
     haptic('warning');
     try {
       await api.deleteSniperRule(rule.id);
-      setRules((prev) => prev.filter((r) => r.id !== rule.id));
+      setRules((prev) => prev.filter((r) => String(r.id) !== String(rule.id)));
       onNotify('Правило видалено', rule.name, 'info');
     } catch (err) {
       onNotify('Не вдалося видалити правило', err instanceof Error ? err.message : '', 'error');
@@ -137,7 +176,18 @@ export const SniperPage: React.FC<SniperPageProps> = ({
     }
     setSavingRule(true);
     try {
-      await api.createSniperRule(ruleForm);
+      const res = await api.createSniperRule(ruleForm);
+      const createdRule =
+        res?.rule || (res && 'id' in res && res.id !== undefined ? (res as SniperRule) : null);
+      if (createdRule && createdRule.id !== undefined) {
+        setRules((prev) => [
+          createdRule,
+          ...prev.filter((r) => String(r.id) !== String(createdRule.id)),
+        ]);
+      } else {
+        const fresh = await api.getSniperRules().catch(() => ({ rules: [] }));
+        setRules(fresh.rules || []);
+      }
       setShowRuleModal(false);
       setRuleForm({
         name: '',
@@ -152,7 +202,6 @@ export const SniperPage: React.FC<SniperPageProps> = ({
         mode: 'alert',
         enabled: true,
       });
-      await loadAll();
       onNotify('Нове правило створено', 'Снайпер почав моніторинг маркетів', 'success');
     } catch (err) {
       onNotify('Помилка створення правила', err instanceof Error ? err.message : '', 'error');
@@ -171,11 +220,65 @@ export const SniperPage: React.FC<SniperPageProps> = ({
     });
   };
 
+  const handleRefreshRadar = async () => {
+    haptic('light');
+    setRefreshingRadar(true);
+    try {
+      const offersRes = await api.getOffers();
+      setOffers(offersRes.offers || []);
+      setRadar(offersRes.radar || []);
+      onNotify('Радар оферів оновлено', 'Актуальні Bid-Ask спреди завантажено', 'info');
+    } catch {
+      onNotify('Не вдалося оновити радар', undefined, 'error');
+    } finally {
+      setRefreshingRadar(false);
+    }
+  };
+
+  const handleSelectRadarItem = async (item: OfferRadarItem) => {
+    haptic('light');
+    if (item.sample_listing) {
+      onSelectListing(item.sample_listing);
+      return;
+    }
+    try {
+      const query = item.collection_name || item.collection_short_name || item.short_name || '';
+      const res = await api.runXRay(query);
+      if (res?.item) {
+        onSelectListing(res.item);
+      }
+    } catch {
+      onNotify('Не вдалося завантажити деталі лота', item.collection_name, 'warning');
+    }
+  };
+
+  const handleSelectAlertCard = async (al: AlertLog) => {
+    haptic('light');
+    if (al.listing) {
+      onSelectListing(al.listing);
+      return;
+    }
+    const query = al.listing_id || al.title || al.rule_name;
+    if (!query) return;
+    try {
+      const res = await api.runXRay(String(query));
+      if (res?.item) {
+        onSelectListing(res.item);
+      }
+    } catch {
+      onNotify('Не вдалося відкрити NFT', String(query), 'warning');
+    }
+  };
+
   const openOfferModal = (item: OfferRadarItem) => {
     haptic('light');
+    const suggestedBid =
+      item.suggested_offer ??
+      item.recommended_bid ??
+      Number(((item.best_offer || item.floor_price * 0.85 || 1) + 0.1).toFixed(2));
     setOfferTarget(item);
-    setOfferBid(item.suggested_offer.toFixed(2));
-    setOfferMaxBid((item.suggested_offer * 1.1).toFixed(2));
+    setOfferBid(suggestedBid.toFixed(2));
+    setOfferMaxBid((suggestedBid * 1.1).toFixed(2));
     setOfferMarket(item.market || 'portals');
     setOfferAutoOutbid(true);
   };
@@ -184,9 +287,13 @@ export const SniperPage: React.FC<SniperPageProps> = ({
     e.preventDefault();
     if (!offerTarget) return;
     setSavingOffer(true);
+    const shortName =
+      offerTarget.collection_short_name ||
+      offerTarget.short_name ||
+      offerTarget.collection_name.toLowerCase().replace(/[^a-z0-9]/g, '');
     try {
       await api.createOffer({
-        collection_short_name: offerTarget.collection_short_name,
+        collection_short_name: shortName,
         collection_name: offerTarget.collection_name,
         market: offerMarket,
         bid_price: Number(offerBid),
@@ -471,6 +578,12 @@ export const SniperPage: React.FC<SniperPageProps> = ({
               <div className="space-y-2.5">
                 {offers.map((offer) => {
                   const mMeta = getMarketMeta(offer.market);
+                  const marketUrl = getMarketCollectionUrl(
+                    offer.market,
+                    offer.collection_short_name,
+                    offer.collection_name,
+                    offer.market_url,
+                  );
                   return (
                     <div key={offer.id} className="ton-card rounded-2xl p-3 space-y-2.5">
                       <div className="flex items-center justify-between gap-2">
@@ -514,19 +627,28 @@ export const SniperPage: React.FC<SniperPageProps> = ({
                         </span>
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5">
                         <button
                           type="button"
                           onClick={() => handleOutbid(offer)}
-                          className="flex-1 h-9 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-xs font-extrabold inline-flex items-center justify-center gap-1 cursor-pointer"
+                          className="flex-1 h-9 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-[11px] font-extrabold inline-flex items-center justify-center gap-1 cursor-pointer"
                         >
                           <Zap className="w-3.5 h-3.5" />
                           <span>Перебити +0.1 TON</span>
                         </button>
+                        <a
+                          href={marketUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="h-9 px-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] border border-[#E2E8F0] hover:border-[#BAE3FC] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-bold inline-flex items-center gap-1 transition-colors"
+                        >
+                          <span>На маркет</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
                         <button
                           type="button"
                           onClick={() => handleDeleteOffer(offer)}
-                          className="h-9 px-3 rounded-xl bg-[#F8FAFC] hover:bg-[#FEF2F2] border border-[#E2E8F0] hover:border-[#FECACA] text-[#334155] hover:text-[#DC2626] text-xs font-bold cursor-pointer transition-colors"
+                          className="h-9 px-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#FEF2F2] border border-[#E2E8F0] hover:border-[#FECACA] text-[#334155] hover:text-[#DC2626] text-[11px] font-bold cursor-pointer transition-colors"
                         >
                           Скасувати
                         </button>
@@ -540,53 +662,97 @@ export const SniperPage: React.FC<SniperPageProps> = ({
 
           {/* Bid-Ask Spread Offer Radar */}
           <section className="lg:col-span-7 space-y-2.5">
-            <div className="px-0.5">
-              <h2 className="font-display text-[14px] font-extrabold text-[#0B1120]">
-                Радар Оферів (Найкращі Bid-Ask Спреди)
-              </h2>
-              <p className="text-[11px] text-[#64748B]">
-                Виставляйте лоубол-офери там, де різниця між флором і топ-бідом максимальна
-              </p>
+            <div className="flex items-center justify-between gap-2 px-0.5">
+              <div>
+                <h2 className="font-display text-[14px] font-extrabold text-[#0B1120]">
+                  Радар Оферів (Найкращі Bid-Ask Спреди)
+                </h2>
+                <p className="text-[11px] text-[#64748B]">
+                  Натисніть на колекцію для X-Ray аналізу NFT або кнопку «Офер» для виставлення біду
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={refreshingRadar}
+                onClick={handleRefreshRadar}
+                className="h-8 px-2.5 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-[11px] font-bold inline-flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-60"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${refreshingRadar ? 'animate-spin' : ''}`} />
+                <span>Оновити радар</span>
+              </button>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {radar.map((item) => (
-                <div
-                  key={item.collection_short_name}
-                  className="ton-card rounded-2xl p-3 flex items-center justify-between gap-2.5"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-10 h-10 rounded-xl overflow-hidden bg-[#F4F7FB] border border-[#E2E8F0] shrink-0">
-                      <NftImage
-                        src={item.photo_url}
-                        alt={item.collection_name}
-                        className="w-full h-full object-cover"
-                      />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-[12.5px] font-extrabold text-[#0B1120] truncate">
-                        {item.collection_name}
-                      </p>
-                      <div className="flex items-center gap-1.5 text-[10.5px] text-[#64748B] tabular-nums mt-0.5">
-                        <span>Флор: {formatTon(item.floor_price)}</span>
-                        <span>·</span>
-                        <span>Офер: {formatTon(item.best_offer)}</span>
-                      </div>
-                      <span className="inline-block mt-1 px-1.5 py-0.5 rounded bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] text-[10px] font-extrabold tabular-nums">
-                        Спред {item.bid_ask_spread_percent.toFixed(1)}% · Лікв. {item.liquidity_score}
-                      </span>
-                    </div>
-                  </div>
+              {radar.map((item) => {
+                const shortName = item.collection_short_name || item.short_name || item.collection_name;
+                const suggestedBid =
+                  item.suggested_offer ??
+                  item.recommended_bid ??
+                  Number(((item.best_offer || 0) + 0.1).toFixed(2));
+                const spreadPct = Number(item.bid_ask_spread_percent ?? 0);
+                const estProfit = item.est_net_profit_ton ?? item.est_profit_ton;
 
-                  <button
-                    type="button"
-                    onClick={() => openOfferModal(item)}
-                    className="ton-btn-primary h-9 px-3 rounded-xl text-[11px] font-bold shrink-0 cursor-pointer"
+                return (
+                  <div
+                    key={shortName}
+                    onClick={() => handleSelectRadarItem(item)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleSelectRadarItem(item);
+                      }
+                    }}
+                    className="ton-card ton-card-hover rounded-2xl p-3 flex items-center justify-between gap-2.5 cursor-pointer text-left"
                   >
-                    Офер
-                  </button>
-                </div>
-              ))}
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                      <div className="w-11 h-11 rounded-xl overflow-hidden bg-[#F4F7FB] border border-[#E2E8F0] shrink-0">
+                        <NftImage
+                          src={item.photo_url || item.sample_listing?.photo_url}
+                          alt={item.collection_name}
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-[12.5px] font-extrabold text-[#0B1120] truncate">
+                          {item.collection_name}
+                        </p>
+                        <div className="flex items-center gap-1.5 text-[10.5px] text-[#64748B] tabular-nums mt-0.5 flex-wrap">
+                          <span>Флор: {formatTon(item.floor_price)}</span>
+                          <span>·</span>
+                          <span>Офер: {formatTon(item.best_offer)}</span>
+                          <span>·</span>
+                          <span className="text-[#0077C8] font-bold">
+                            Рек: {formatTon(suggestedBid)}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1 mt-1 flex-wrap">
+                          <span className="inline-block px-1.5 py-0.5 rounded bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] text-[10px] font-extrabold tabular-nums">
+                            Спред {spreadPct.toFixed(1)}% · Лікв. {item.liquidity_score}
+                          </span>
+                          {typeof estProfit === 'number' && estProfit > 0 && (
+                            <span className="inline-block px-1.5 py-0.5 rounded bg-[#F0F8FF] text-[#0098EA] border border-[#BAE3FC] text-[10px] font-extrabold tabular-nums">
+                              +{formatTon(estProfit)} TON
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openOfferModal(item);
+                      }}
+                      className="ton-btn-primary h-9 px-3 rounded-xl text-[11px] font-bold shrink-0 cursor-pointer"
+                    >
+                      Офер
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </section>
         </div>
@@ -740,7 +906,7 @@ export const SniperPage: React.FC<SniperPageProps> = ({
             )}
           </div>
 
-          {/* Right: Alert History List */}
+          {/* Right: Alert History List — Rich Mini NFT Cards */}
           <div className="lg:col-span-7 space-y-2.5">
             <h3 className="font-display text-[14px] font-extrabold text-[#0B1120] px-0.5 flex items-center gap-1.5">
               <Bell className="w-4 h-4 text-[#0098EA]" />
@@ -751,42 +917,142 @@ export const SniperPage: React.FC<SniperPageProps> = ({
                 Журнал порожній. Натисніть «Тест ТГ-картки», щоб перевірити алерти.
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {alerts.map((al) => (
-                  <button
-                    key={al.id}
-                    type="button"
-                    onClick={() => al.listing && onSelectListing(al.listing)}
-                    className="w-full text-left ton-card ton-card-hover rounded-2xl p-3 flex items-center gap-2.5 cursor-pointer"
-                  >
-                    <div className="w-11 h-11 rounded-xl overflow-hidden bg-[#F4F7FB] border border-[#E2E8F0] shrink-0">
-                      <NftImage
-                        src={al.listing?.photo_url}
-                        alt={al.title || al.rule_name || 'Алерт'}
-                        className="w-full h-full object-cover"
-                      />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-xs font-extrabold text-[#0B1120] truncate">
-                          {al.title ||
-                            (al.listing
-                              ? `${al.listing.collection_name} #${al.listing.number}`
-                              : al.rule_name || 'Спрацювання снайпера')}
-                        </p>
-                        <span className="text-[10px] text-[#64748B] shrink-0">
-                          {formatTimeAgo(al.created_at)}
-                        </span>
+              <div className="grid grid-cols-1 gap-2.5">
+                {alerts.map((al) => {
+                  const lst = al.listing;
+                  const titleText = lst
+                    ? `${lst.collection_name} #${lst.number}`
+                    : al.title || al.rule_name || 'Спрацювання снайпера';
+                  const marketUrl = lst
+                    ? lst.market_url ||
+                      getMarketCollectionUrl(lst.market, lst.short_name, lst.collection_name)
+                    : 'https://portal-market.com';
+                  const tgNftUrl = lst?.tg_id
+                    ? `https://t.me/nft/${lst.tg_id}`
+                    : 'https://t.me/GiftKit_bot';
+
+                  return (
+                    <div
+                      key={al.id}
+                      onClick={() => handleSelectAlertCard(al)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          handleSelectAlertCard(al);
+                        }
+                      }}
+                      className="w-full text-left ton-card ton-card-hover rounded-2xl p-3 flex flex-col gap-2.5 cursor-pointer"
+                    >
+                      <div className="flex items-start gap-3">
+                        {/* Left: Square NFT thumbnail */}
+                        <div className="w-16 h-16 rounded-xl overflow-hidden bg-[#F4F7FB] border border-[#E2E8F0] shrink-0">
+                          <NftImage
+                            src={lst?.photo_url}
+                            alt={titleText}
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+
+                        {/* Center: Title, Valuation & Badges */}
+                        <div className="flex-1 min-w-0 space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-[13px] font-extrabold text-[#0B1120] truncate">
+                              {titleText}
+                            </p>
+                            <span className="text-[10.5px] font-semibold text-[#64748B] shrink-0">
+                              {formatTimeAgo(al.created_at)}
+                            </span>
+                          </div>
+
+                          {lst ? (
+                            <>
+                              {/* Price & Valuation Row */}
+                              <div className="flex items-center gap-1.5 flex-wrap text-[11px] text-[#334155] tabular-nums">
+                                <span>
+                                  Ціна: <strong className="text-[#0B1120]">{formatTon(lst.price)} TON</strong>
+                                </span>
+                                <span>·</span>
+                                <span>Флор: {formatTon(lst.collection_floor)} TON</span>
+                                <span>·</span>
+                                <span>
+                                  Fair: <strong className="text-[#0077C8]">{formatTon(lst.fair_value)} TON</strong>
+                                </span>
+                                <span className="px-1.5 py-0.5 rounded-md bg-[#0098EA] text-white text-[10px] font-extrabold">
+                                  -{Math.round(lst.discount_percent)}%
+                                </span>
+                              </div>
+
+                              {/* Visual / Nice Number / Symbol Badges Row */}
+                              <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
+                                {typeof lst.visual_score === 'number' && (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] text-[10px] font-bold tabular-nums">
+                                    <Eye className="w-2.5 h-2.5" />
+                                    Візуал {lst.visual_score.toFixed(1)}/10
+                                  </span>
+                                )}
+                                {lst.harmony_label && (
+                                  <span className="px-1.5 py-0.5 rounded-md bg-[#F0F8FF] text-[#0098EA] border border-[#BAE3FC] text-[10px] font-bold">
+                                    {lst.harmony_label}
+                                  </span>
+                                )}
+                                {(lst.number_pattern || lst.number_badge) && (
+                                  <span className="px-1.5 py-0.5 rounded-md bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] text-[10px] font-bold">
+                                    {lst.number_pattern || lst.number_badge}
+                                  </span>
+                                )}
+                                {lst.symbol_badge && (
+                                  <span className="px-1.5 py-0.5 rounded-md bg-[#F8FAFC] text-[#334155] border border-[#E2E8F0] text-[10px] font-bold">
+                                    {lst.symbol_badge}
+                                  </span>
+                                )}
+                              </div>
+                            </>
+                          ) : (
+                            <p className="text-[11px] text-[#334155] line-clamp-2">
+                              {al.message || 'Новий сигнал снайпера — натисніть для відкриття NFT'}
+                            </p>
+                          )}
+                        </div>
                       </div>
-                      <p className="text-[11px] text-[#334155] truncate mt-0.5">
-                        {al.message ||
-                          (al.listing
-                            ? `${formatTon(al.listing.price)} TON (дисконт -${Math.round(al.listing.discount_percent)}%)`
-                            : 'Новий сигнал')}
-                      </p>
+
+                      {/* Direct Action Links Row */}
+                      <div className="flex items-center gap-1.5 pt-2 border-t border-[#F1F5F9]">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSelectAlertCard(al);
+                          }}
+                          className="flex-1 h-8 px-2.5 rounded-xl bg-[#0098EA] hover:bg-[#0077C8] text-white text-[11px] font-extrabold inline-flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                        >
+                          <span>Відкрити NFT</span>
+                        </button>
+                        <a
+                          href={marketUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="h-8 px-2.5 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-[11px] font-bold inline-flex items-center justify-center gap-1 transition-colors"
+                        >
+                          <span>На маркеті</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                        <a
+                          href={tgNftUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="h-8 px-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] border border-[#E2E8F0] hover:border-[#BAE3FC] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-bold inline-flex items-center justify-center gap-1 transition-colors"
+                        >
+                          <span>Власник в ТГ</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
                     </div>
-                  </button>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1076,6 +1342,21 @@ export const SniperPage: React.FC<SniperPageProps> = ({
             >
               {savingOffer ? 'Розміщення...' : 'Поставити офер'}
             </button>
+
+            <a
+              href={getMarketCollectionUrl(
+                offerMarket,
+                offerTarget.collection_short_name || offerTarget.short_name,
+                offerTarget.collection_name,
+                offerTarget.market_url,
+              )}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full h-10 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-xs font-extrabold inline-flex items-center justify-center gap-1.5 transition-colors"
+            >
+              <span>Відкрити колекцію на маркеті</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
           </form>
         </div>
       )}

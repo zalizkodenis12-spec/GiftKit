@@ -7,43 +7,58 @@ import html
 import time
 from typing import Any, Awaitable, Callable
 
+import httpx
 from loguru import logger
 
-from backend.config import base_settings, runtime_config
+from backend.config import IS_VERCEL, base_settings, runtime_config
 from backend.database import db
 from backend.models import AnalyzedListing
+from backend.services import auth_service
 from backend.services.analytics_engine import analytics_engine
+from backend.services.auth_service import DEFAULT_ADMIN_USER_ID
 from backend.services.visual_analyzer import visual_analyzer
 from backend.services.ws_manager import ws_manager
 
 
 def _collect_gem_reasons(listing: AnalyzedListing) -> list[str]:
     """Return crisp Ukrainian reasons why a listing is genuinely worth flipping."""
-    reasons: list[str] = []
-    near_floor = listing.collection_floor <= 0 or listing.price <= listing.collection_floor * 1.08
+    deep_discount = (
+        listing.collection_floor > 0
+        and listing.price <= listing.collection_floor * 0.85
+        and listing.discount_percent >= 15.0
+    )
 
-    if listing.is_monochrome and near_floor:
+    # Hard Visual Quality Floor: never alert on ugly/muddy/clashing items unless >=15% below collection floor
+    if listing.visual_score < 7.6 and not deep_discount:
+        return []
+
+    reasons: list[str] = []
+    at_floor = listing.collection_floor <= 0 or listing.price <= listing.collection_floor * 1.02
+    near_floor_mono = listing.collection_floor <= 0 or listing.price <= listing.collection_floor * 1.06
+    visual_ok = listing.visual_score >= 7.5 or listing.is_monochrome or bool(listing.harmony_label)
+
+    if listing.is_monochrome and listing.visual_score >= 7.8 and near_floor_mono:
         reasons.append("Монохром")
-    elif listing.harmony_label and near_floor:
+    elif listing.harmony_label and listing.visual_score >= 7.6 and at_floor:
         reasons.append(listing.harmony_label)
 
-    if listing.number_bonus_percent >= 14.0:
+    if listing.number_bonus_percent >= 18.0 and visual_ok and near_floor_mono:
         reasons.append(listing.number_pattern or f"Топ номер #{listing.number}")
-    elif listing.number_bonus_percent >= 8.0 and near_floor:
+    elif listing.number_bonus_percent >= 10.0 and visual_ok and at_floor:
         reasons.append(listing.number_pattern or f"Красивий номер #{listing.number}")
 
-    if listing.symbol_badge and listing.symbol_bonus_percent >= 7.5 and near_floor:
+    if listing.symbol_badge and listing.symbol_bonus_percent >= 8.5 and visual_ok and at_floor:
         reasons.append(listing.symbol_badge)
 
     if (
         listing.collection_floor > 0
-        and listing.price <= listing.collection_floor * 0.95
+        and listing.price <= listing.collection_floor * 0.94
         and listing.discount_percent >= 12.0
     ):
         pct_below = round((1.0 - listing.price / listing.collection_floor) * 100.0, 1)
         reasons.append(f"Нижче флора (-{pct_below}%)")
 
-    if listing.visual_score >= 8.2 and near_floor and not reasons:
+    if listing.visual_score >= 8.2 and at_floor and not reasons:
         reasons.append(f"Топ візуал {listing.visual_score:.1f}/10")
 
     return reasons
@@ -213,9 +228,49 @@ class SniperEngine:
 
         return True
 
+    async def _sync_with_remote_webapp(
+        self,
+        user_id: str,
+        pushed_alerts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Bi-directional state & alert sync between local @GiftKit_bot process and Vercel webapp."""
+        if IS_VERCEL:
+            return
+        url = runtime_config.webapp_url.strip().rstrip("/")
+        if not url.startswith("https://") or url in ("https://t.me", "https://your-miniapp-domain.com"):
+            return
+
+        endpoint = f"{url}/api/internal/bot-sync"
+        headers = {"X-Bot-Sync-Signature": auth_service.get_bot_sync_signature()}
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(3.0, connect=2.0)) as client:
+                if pushed_alerts:
+                    local_env = await db.export_user_state(user_id)
+                    await client.post(
+                        endpoint,
+                        headers=headers,
+                        json={
+                            "user_id": user_id,
+                            "state_envelope": local_env,
+                            "alerts": pushed_alerts,
+                        },
+                    )
+                else:
+                    resp = await client.get(endpoint, headers=headers, params={"user_id": user_id})
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        remote_env = data.get("state_envelope")
+                        if isinstance(remote_env, dict):
+                            await db.import_user_state(user_id, remote_env)
+        except Exception as exc:
+            logger.debug(f"Remote bot-sync skipped: {exc}")
+
     async def evaluate_once(self) -> list[dict[str, Any]]:
         """Run one scan cycle across active sniper rules."""
-        rules = [r for r in await db.list_sniper_rules() if r["enabled"]]
+        admin_uid = (runtime_config.tg_admin_chat_id or DEFAULT_ADMIN_USER_ID).strip() or DEFAULT_ADMIN_USER_ID
+        await self._sync_with_remote_webapp(admin_uid)
+
+        rules = [r for r in await db.list_sniper_rules(user_id=admin_uid) if r["enabled"]]
         if not rules:
             return []
 
@@ -229,7 +284,6 @@ class SniperEngine:
                 continue
 
             # Pre-filter: must have at least one genuine trader edge
-            # (nice number, thematic/top background icon, true monochrome/luxury combo, or real below-floor price)
             pre_reasons = _collect_gem_reasons(listing)
             if not pre_reasons:
                 continue
@@ -238,7 +292,7 @@ class SniperEngine:
                 if not self._listing_matches_rule(listing, rule):
                     continue
 
-                # Anti-spam cooldown: max 1 alert per rule every 5 minutes
+                rule_uid = str(rule.get("user_id") or admin_uid).strip()
                 rule_id = int(rule["id"])
                 if now_ts - self._last_rule_alert_ts.get(rule_id, 0.0) < 300.0:
                     continue
@@ -247,14 +301,11 @@ class SniperEngine:
                 if dedup_key in self._seen_keys:
                     continue
 
-                # Prevent unbounded memory growth
                 if len(self._seen_keys) > 2000:
                     self._seen_keys.clear()
-                # Mark seen BEFORE AI call so rejected trash isn't re-evaluated every 18s
                 self._seen_keys.add(dedup_key)
 
-                # FINAL GATE: verify finalist with Gemini AI Vision (when key is set) so ugly/false-monochrome
-                # lots are NEVER sent to Telegram!
+                # FINAL GATE: verify finalist with AI Vision / Pixel CV
                 try:
                     attrs_dicts = [{"type": a.type, "value": a.value} for a in listing.attributes]
                     ai_res = await visual_analyzer.evaluate_with_ai_vision(
@@ -278,52 +329,70 @@ class SniperEngine:
 
                     ai_source = ai_res.get("source")
                     worth_alert = ai_res.get("worth_alert")
-                    post_reasons = _collect_gem_reasons(listing)
-
-                    has_strong_math_edge = (
-                        listing.number_bonus_percent >= 12.0
-                        or (
-                            listing.symbol_bonus_percent >= 8.5
-                            and listing.price <= listing.collection_floor * 1.03
-                        )
-                        or (
-                            listing.collection_floor > 0
-                            and listing.price <= listing.collection_floor * 0.90
-                        )
-                    )
-
-                    if not post_reasons:
-                        logger.info(
-                            f"Sniper vetoed {listing.collection_name} #{listing.number} after AI verification (no valid edge left)"
-                        )
-                        continue
-
-                    if ai_source in {"gemini", "openai"}:
-                        if worth_alert is False and not has_strong_math_edge:
-                            logger.info(
-                                f"Sniper AI Vision vetoed {listing.collection_name} #{listing.number} (score={listing.visual_score}, worth_alert=False)"
-                            )
-                            continue
-                        if listing.visual_score < 6.0 and not has_strong_math_edge:
-                            logger.info(
-                                f"Sniper AI Vision vetoed weak visual {listing.collection_name} #{listing.number} (score={listing.visual_score})"
-                            )
-                            continue
                 except Exception as exc:
                     logger.debug(f"Sniper AI verification skipped: {exc}")
+                    ai_source = "cv_pixels"
+                    worth_alert = None
+
+                # Enforce strict post-CV/AI visual floor even when ai_source == "cv_pixels"
+                if listing.visual_score < 7.5 and not (
+                    listing.collection_floor > 0 and listing.price <= listing.collection_floor * 0.85
+                ):
+                    logger.info(
+                        f"Sniper vetoed weak visual {listing.collection_name} #{listing.number} (score={listing.visual_score})"
+                    )
+                    continue
+
+                post_reasons = _collect_gem_reasons(listing)
+                if not post_reasons:
+                    logger.info(
+                        f"Sniper vetoed {listing.collection_name} #{listing.number} after CV/AI verification (no valid edge left)"
+                    )
+                    continue
+
+                has_strong_math_edge = (
+                    (listing.number_bonus_percent >= 14.0 and listing.visual_score >= 7.5)
+                    or (
+                        listing.symbol_bonus_percent >= 8.5
+                        and listing.visual_score >= 7.5
+                        and listing.price <= listing.collection_floor * 1.02
+                    )
+                    or (
+                        listing.collection_floor > 0
+                        and listing.price <= listing.collection_floor * 0.85
+                    )
+                )
+
+                if ai_source in {"gemini", "openai"}:
+                    if worth_alert is False and not has_strong_math_edge:
+                        logger.info(
+                            f"Sniper AI Vision vetoed {listing.collection_name} #{listing.number} (score={listing.visual_score}, worth_alert=False)"
+                        )
+                        continue
+                    if listing.visual_score < 7.5 and not has_strong_math_edge:
+                        logger.info(
+                            f"Sniper AI Vision vetoed weak visual {listing.collection_name} #{listing.number} (score={listing.visual_score})"
+                        )
+                        continue
 
                 self._last_rule_alert_ts[rule_id] = now_ts
 
                 # Check risk guard if autobuy mode
                 autobuy_note = ""
                 if rule["mode"] == "autobuy":
-                    today_spent = await db.get_today_spent_ton()
+                    today_spent = await db.get_today_spent_ton(user_id=rule_uid)
                     if listing.price > runtime_config.max_single_buy_ton:
                         autobuy_note = f" [Автовикуп пропущено: перевищено ліміт угоди {runtime_config.max_single_buy_ton} TON]"
                     elif today_spent + listing.price > runtime_config.daily_limit_ton:
                         autobuy_note = f" [Автовикуп пропущено: денний ліміт {runtime_config.daily_limit_ton} TON]"
                     else:
-                        await db.record_trade(listing.id, listing.short_name, listing.price, runtime_config.dry_run)
+                        await db.record_trade(
+                            listing.id,
+                            listing.short_name,
+                            listing.price,
+                            runtime_config.dry_run,
+                            user_id=rule_uid,
+                        )
                         await db.create_portfolio_item(
                             {
                                 "tg_id": listing.tg_id,
@@ -339,7 +408,8 @@ class SniperEngine:
                                 "min_price_guard": round(listing.price * 1.07, 2),
                                 "undercut_step": 0.05,
                                 "status": "listed",
-                            }
+                            },
+                            user_id=rule_uid,
                         )
                         mode_lbl = "DRY RUN симуляція" if runtime_config.dry_run else "LIVE ордер"
                         autobuy_note = f" [Автовикуп: {mode_lbl} — додано в портфель]"
@@ -363,21 +433,28 @@ class SniperEngine:
                     payload=listing.model_dump(),
                     telegram_html=tg_html,
                     telegram_sent=tg_sent,
+                    user_id=rule_uid,
                 )
                 await ws_manager.broadcast("sniper_alert", log_entry)
                 triggered_alerts.append(log_entry)
-                # Cap alerts per scan cycle to avoid flooding user
                 if len(triggered_alerts) >= 3:
-                    return triggered_alerts
+                    break
+
+            if len(triggered_alerts) >= 3:
+                break
+
+        if triggered_alerts:
+            await self._sync_with_remote_webapp(admin_uid, pushed_alerts=triggered_alerts)
 
         return triggered_alerts
 
-    async def trigger_test_alert(self) -> dict[str, Any]:
+    async def trigger_test_alert(self, user_id: str = DEFAULT_ADMIN_USER_ID) -> dict[str, Any]:
         """Pick the strongest live deal right now, log it, broadcast WS & dispatch to Telegram."""
-        listings = await analytics_engine.get_analyzed_listings(sort="discount_desc", limit=10)
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        listings = await analytics_engine.get_analyzed_listings(sort="discount_desc", limit=15)
         if not listings:
             raise RuntimeError("Немає активних лотів для тестового алерту")
-        best = listings[0]
+        best = next((it for it in listings if it.visual_score >= 7.5), listings[0])
         rule_name = "Тестовий Снайпер-сигнал PRO"
         tg_html = format_telegram_alert_html(best, rule_name)
 
@@ -397,6 +474,7 @@ class SniperEngine:
             payload=best.model_dump(),
             telegram_html=tg_html,
             telegram_sent=tg_sent,
+            user_id=uid,
         )
         await ws_manager.broadcast("sniper_alert", alert_log)
         msg = (
@@ -416,7 +494,6 @@ class SniperEngine:
         }
 
     async def _loop(self) -> None:
-        # Short warmup delay before first background scan
         await asyncio.sleep(6)
         while self._running:
             try:

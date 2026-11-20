@@ -280,6 +280,14 @@ export interface CreateSniperRulePayload {
   enabled: boolean;
 }
 
+export interface UserProfile {
+  tg_user_id: string;
+  username?: string;
+  first_name?: string;
+  last_name?: string;
+  photo_url?: string;
+}
+
 export interface AlertLog {
   id: number | string;
   rule_id?: number | string | null;
@@ -290,6 +298,7 @@ export interface AlertLog {
   html_preview?: string;
   telegram_sent?: boolean;
   created_at: string;
+  listing_id?: string | null;
   listing?: AnalyzedListing | null;
 }
 
@@ -310,6 +319,7 @@ export interface UserOffer {
   collection_name: string;
   photo_url?: string;
   market: MarketName | string;
+  market_url?: string;
   bid_price: number;
   max_bid: number;
   top_competitor_bid?: number;
@@ -321,15 +331,22 @@ export interface UserOffer {
 
 export interface OfferRadarItem {
   collection_short_name: string;
+  short_name?: string;
   collection_name: string;
   photo_url?: string;
   floor_price: number;
   best_offer: number;
-  suggested_offer: number;
+  suggested_offer?: number;
+  recommended_bid?: number;
   bid_ask_spread_percent: number;
   est_profit_ton?: number;
+  est_net_profit_ton?: number;
+  est_roi_percent?: number;
+  sales_24h?: number;
   liquidity_score: number;
   market?: MarketName | string;
+  market_url?: string;
+  sample_listing?: AnalyzedListing | null;
 }
 
 export interface OffersResponse {
@@ -477,6 +494,7 @@ declare global {
         ready: () => void;
         expand: () => void;
         close?: () => void;
+        initData?: string;
         setHeaderColor?: (color: string) => void;
         setBackgroundColor?: (color: string) => void;
         HapticFeedback?: {
@@ -484,11 +502,25 @@ declare global {
           notificationOccurred?: (type: 'error' | 'success' | 'warning') => void;
           selectionChanged?: () => void;
         };
+        CloudStorage?: {
+          setItem: (
+            key: string,
+            value: string,
+            callback?: (err: Error | null, stored?: boolean) => void,
+          ) => void;
+          getItem: (
+            key: string,
+            callback: (err: Error | null, value?: string) => void,
+          ) => void;
+        };
         initDataUnsafe?: {
+          start_param?: string;
           user?: {
             id?: number;
             first_name?: string;
+            last_name?: string;
             username?: string;
+            photo_url?: string;
           };
         };
       };

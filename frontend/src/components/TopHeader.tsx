@@ -9,19 +9,27 @@ import {
   Search,
   ShieldCheck,
   SlidersHorizontal,
+  User,
   Zap,
 } from 'lucide-react';
-import type { BeforeInstallPromptEvent, OverviewResponse, TabKey } from '../types/api';
+import type {
+  BeforeInstallPromptEvent,
+  OverviewResponse,
+  TabKey,
+  UserProfile,
+} from '../types/api';
 import { formatPercent, haptic } from '../utils/format';
 
 interface TopHeaderProps {
   overview: OverviewResponse | null;
+  userProfile: UserProfile | null;
   wsConnected: boolean;
   activeTab: TabKey;
   undercutCount: number;
   onChangeTab: (tab: TabKey) => void;
   onOpenXRay: () => void;
   onOpenMarkets: () => void;
+  onOpenProfile: () => void;
   onNotify: (
     title: string,
     message?: string,
@@ -59,16 +67,19 @@ function isStandaloneMode(): boolean {
 
 export const TopHeader: React.FC<TopHeaderProps> = ({
   overview,
+  userProfile,
   wsConnected,
   activeTab,
   undercutCount,
   onChangeTab,
   onOpenXRay,
   onOpenMarkets,
+  onOpenProfile,
   onNotify,
 }) => {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [installed, setInstalled] = useState<boolean>(() => isStandaloneMode());
+  const [avatarErr, setAvatarErr] = useState(false);
 
   useEffect(() => {
     const handleBeforeInstall = (e: Event) => {
@@ -243,6 +254,45 @@ export const TopHeader: React.FC<TopHeaderProps> = ({
           >
             <Search className="w-3.5 h-3.5" />
             <span>X-Ray</span>
+          </button>
+
+          {/* Telegram User Profile Pill */}
+          <button
+            type="button"
+            onClick={() => {
+              haptic('light');
+              onOpenProfile();
+            }}
+            title={
+              userProfile
+                ? `Telegram профіль: ${userProfile.first_name || ''} ${
+                    userProfile.username ? `(@${userProfile.username})` : ''
+                  } · ID ${userProfile.tg_user_id}`
+                : 'Профіль Telegram та Хмарна синхронізація'
+            }
+            className="flex items-center gap-1.5 h-8 pl-1 pr-2 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-bold transition-colors cursor-pointer border border-[#E2E8F0] hover:border-[#BAE3FC]"
+          >
+            {userProfile?.photo_url && !avatarErr ? (
+              <img
+                src={userProfile.photo_url}
+                alt={userProfile.first_name || userProfile.username || 'TG'}
+                onError={() => setAvatarErr(true)}
+                className="w-6 h-6 rounded-full object-cover border border-[#BAE3FC] shrink-0"
+              />
+            ) : (
+              <span className="w-6 h-6 rounded-full bg-[#0098EA] text-white text-[10px] font-extrabold flex items-center justify-center shrink-0">
+                {userProfile?.first_name
+                  ? userProfile.first_name.slice(0, 1).toUpperCase()
+                  : userProfile?.username
+                    ? userProfile.username.slice(0, 1).toUpperCase()
+                    : <User className="w-3.5 h-3.5" />}
+              </span>
+            )}
+            <span className="hidden sm:inline max-w-[92px] truncate">
+              {userProfile?.username
+                ? `@${userProfile.username}`
+                : userProfile?.first_name || 'Профіль'}
+            </span>
           </button>
 
           <button

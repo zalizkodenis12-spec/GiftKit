@@ -1,10 +1,11 @@
-"""Async SQLite database layer using aiosqlite."""
+"""Async SQLite database layer using aiosqlite with multi-user isolation & signed state sync."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,8 @@ import aiosqlite
 from loguru import logger
 
 from backend.config import IS_VERCEL, SETTINGS_KEYS, base_settings, runtime_config
+from backend.services import auth_service
+from backend.services.auth_service import DEFAULT_ADMIN_USER_ID
 
 
 def utc_now_iso() -> str:
@@ -23,6 +26,10 @@ def _strip_emojis(text: str) -> str:
     if not text:
         return ""
     return re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]+", "", text).strip()
+
+
+def _next_state_version(current_version: int = 1) -> int:
+    return max(int(time.time() * 1000), int(current_version or 1) + 1)
 
 
 class Database:
@@ -71,8 +78,23 @@ class Database:
     async def _create_tables(self) -> None:
         await self.conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS users (
+                tg_user_id TEXT PRIMARY KEY,
+                username TEXT DEFAULT '',
+                first_name TEXT DEFAULT '',
+                last_name TEXT DEFAULT '',
+                photo_url TEXT DEFAULT '',
+                state_version INTEGER DEFAULT 1,
+                deleted_rule_ids_json TEXT DEFAULT '[]',
+                deleted_offer_ids_json TEXT DEFAULT '[]',
+                deleted_portfolio_ids_json TEXT DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS sniper_rules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL DEFAULT 'owner',
                 name TEXT NOT NULL,
                 collection_short_name TEXT DEFAULT '',
                 collection_name TEXT DEFAULT 'Усі колекції',
@@ -90,6 +112,7 @@ class Database:
 
             CREATE TABLE IF NOT EXISTS portfolio_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL DEFAULT 'owner',
                 tg_id TEXT NOT NULL,
                 collection_name TEXT NOT NULL,
                 short_name TEXT NOT NULL,
@@ -111,6 +134,7 @@ class Database:
 
             CREATE TABLE IF NOT EXISTS user_offers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL DEFAULT 'owner',
                 collection_short_name TEXT NOT NULL,
                 collection_name TEXT NOT NULL,
                 market TEXT DEFAULT 'portals',
@@ -124,6 +148,7 @@ class Database:
 
             CREATE TABLE IF NOT EXISTS alert_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL DEFAULT 'owner',
                 alert_type TEXT NOT NULL,
                 rule_id INTEGER DEFAULT NULL,
                 rule_name TEXT DEFAULT '',
@@ -156,6 +181,7 @@ class Database:
 
             CREATE TABLE IF NOT EXISTS trade_ledger (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL DEFAULT 'owner',
                 listing_id TEXT DEFAULT '',
                 short_name TEXT NOT NULL,
                 price_ton REAL NOT NULL,
@@ -164,92 +190,456 @@ class Database:
             );
             """
         )
+
+        # Safely migrate existing tables if user_id column is missing
+        scoped_tables = (
+            "sniper_rules",
+            "portfolio_items",
+            "user_offers",
+            "alert_logs",
+            "trade_ledger",
+        )
+        for tbl in scoped_tables:
+            async with self.conn.execute(f"PRAGMA table_info({tbl})") as cur:
+                cols = [r["name"] for r in await cur.fetchall()]
+            if "user_id" not in cols:
+                await self.conn.execute(
+                    f"ALTER TABLE {tbl} ADD COLUMN user_id TEXT NOT NULL DEFAULT 'owner'"
+                )
+
         await self.conn.commit()
 
     async def _seed_defaults(self) -> None:
+        """Clean up legacy fake seeded offers — no fake rules, offers, or portfolio items are seeded."""
+        await self.conn.execute(
+            """
+            DELETE FROM user_offers
+            WHERE collection_short_name IN ('eternalrose', 'plushpepe')
+              AND bid_price IN (24.8, 415.0)
+            """
+        )
+        await self.conn.commit()
+
+    # -------------------- USERS & STATE VERSIONING --------------------
+
+    @staticmethod
+    def _parse_int_list(raw_json: str | None) -> list[int]:
+        if not raw_json:
+            return []
+        try:
+            items = json.loads(raw_json)
+            if isinstance(items, list):
+                return sorted({int(x) for x in items})
+        except Exception:
+            pass
+        return []
+
+    @classmethod
+    def _row_to_user(cls, row: aiosqlite.Row) -> dict[str, Any]:
+        username = row["username"] or ""
+        photo_url = row["photo_url"] or ""
+        if not photo_url and username:
+            photo_url = f"https://t.me/i/userpic/320/{username}.jpg"
+        return {
+            "tg_user_id": str(row["tg_user_id"]),
+            "username": username,
+            "first_name": row["first_name"] or "",
+            "last_name": row["last_name"] or "",
+            "photo_url": photo_url,
+            "state_version": int(row["state_version"] or 1),
+            "deleted_rule_ids": cls._parse_int_list(row["deleted_rule_ids_json"]),
+            "deleted_offer_ids": cls._parse_int_list(row["deleted_offer_ids_json"]),
+            "deleted_portfolio_ids": cls._parse_int_list(row["deleted_portfolio_ids_json"]),
+            "created_at": row["created_at"],
+            "last_seen_at": row["last_seen_at"],
+        }
+
+    async def get_user(self, tg_user_id: str) -> dict[str, Any] | None:
+        uid = str(tg_user_id or DEFAULT_ADMIN_USER_ID).strip()
+        async with self.conn.execute("SELECT * FROM users WHERE tg_user_id = ?", (uid,)) as cur:
+            row = await cur.fetchone()
+        return self._row_to_user(row) if row else None
+
+    async def upsert_user(self, user_dict: dict[str, Any]) -> dict[str, Any]:
+        norm = auth_service.normalize_user_dict(user_dict)
+        uid = norm["tg_user_id"] or DEFAULT_ADMIN_USER_ID
+        now = utc_now_iso()
+        existing = await self.get_user(uid)
+        if not existing:
+            await self.conn.execute(
+                """
+                INSERT INTO users (
+                    tg_user_id, username, first_name, last_name, photo_url,
+                    state_version, deleted_rule_ids_json, deleted_offer_ids_json,
+                    deleted_portfolio_ids_json, created_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, 1, '[]', '[]', '[]', ?, ?)
+                """,
+                (
+                    uid,
+                    norm["username"],
+                    norm["first_name"],
+                    norm["last_name"],
+                    norm["photo_url"],
+                    now,
+                    now,
+                ),
+            )
+        else:
+            username = norm["username"] or existing["username"]
+            first_name = norm["first_name"] or existing["first_name"]
+            last_name = norm["last_name"] or existing["last_name"]
+            photo_url = norm["photo_url"] or existing["photo_url"]
+            await self.conn.execute(
+                """
+                UPDATE users
+                SET username = ?, first_name = ?, last_name = ?, photo_url = ?, last_seen_at = ?
+                WHERE tg_user_id = ?
+                """,
+                (username, first_name, last_name, photo_url, now, uid),
+            )
+        await self.conn.commit()
+        user = await self.get_user(uid)
+        assert user is not None
+        return user
+
+    async def _ensure_user_row(self, user_id: str) -> dict[str, Any]:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        user = await self.get_user(uid)
+        if user is None:
+            user = await self.upsert_user({"tg_user_id": uid})
+        return user
+
+    async def _bump_user_state(
+        self,
+        user_id: str,
+        *,
+        deleted_rule_id: int | None = None,
+        deleted_offer_id: int | None = None,
+        deleted_portfolio_id: int | None = None,
+        restored_rule_id: int | None = None,
+        restored_offer_id: int | None = None,
+        restored_portfolio_id: int | None = None,
+    ) -> int:
+        user = await self._ensure_user_row(user_id)
+        uid = user["tg_user_id"]
+        new_version = _next_state_version(user["state_version"])
+
+        del_rules = set(user["deleted_rule_ids"])
+        del_offers = set(user["deleted_offer_ids"])
+        del_portfolio = set(user["deleted_portfolio_ids"])
+
+        if deleted_rule_id is not None:
+            del_rules.add(int(deleted_rule_id))
+        if restored_rule_id is not None:
+            del_rules.discard(int(restored_rule_id))
+
+        if deleted_offer_id is not None:
+            del_offers.add(int(deleted_offer_id))
+        if restored_offer_id is not None:
+            del_offers.discard(int(restored_offer_id))
+
+        if deleted_portfolio_id is not None:
+            del_portfolio.add(int(deleted_portfolio_id))
+        if restored_portfolio_id is not None:
+            del_portfolio.discard(int(restored_portfolio_id))
+
+        await self.conn.execute(
+            """
+            UPDATE users
+            SET state_version = ?,
+                deleted_rule_ids_json = ?,
+                deleted_offer_ids_json = ?,
+                deleted_portfolio_ids_json = ?,
+                last_seen_at = ?
+            WHERE tg_user_id = ?
+            """,
+            (
+                new_version,
+                json.dumps(sorted(del_rules)),
+                json.dumps(sorted(del_offers)),
+                json.dumps(sorted(del_portfolio)),
+                utc_now_iso(),
+                uid,
+            ),
+        )
+        await self.conn.commit()
+        return new_version
+
+    async def export_user_state(self, user_id: str = DEFAULT_ADMIN_USER_ID) -> dict[str, Any]:
+        """Export HMAC-signed state snapshot for cross-device & Vercel cold-start restoration."""
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        user = await self._ensure_user_row(uid)
+        rules = await self.list_sniper_rules(user_id=uid)
+        offers = await self.list_offers(user_id=uid)
+        portfolio = await self.list_portfolio_items(user_id=uid)
+        payload = {
+            "state_version": user["state_version"],
+            "rules": rules,
+            "offers": offers,
+            "portfolio": portfolio,
+            "deleted_rule_ids": user["deleted_rule_ids"],
+            "deleted_offer_ids": user["deleted_offer_ids"],
+            "deleted_portfolio_ids": user["deleted_portfolio_ids"],
+        }
+        return auth_service.sign_state_envelope(uid, payload)
+
+    async def import_user_state(self, user_id: str, envelope_data: dict[str, Any]) -> bool:
+        """Verify and restore user's rules, offers, portfolio & tombstones from a signed envelope."""
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        verified = auth_service.verify_state_envelope(uid, envelope_data)
+        if not verified:
+            return False
+
+        local_user = await self.get_user(uid)
+        incoming_version = int(verified.get("state_version") or 1)
+        local_version = int(local_user["state_version"]) if local_user else 0
+
+        if local_user is not None and incoming_version <= local_version:
+            return False
+
+        user = await self._ensure_user_row(uid)
+        del_rules = sorted(set(user["deleted_rule_ids"]) | set(verified["deleted_rule_ids"]))
+        del_offers = sorted(set(user["deleted_offer_ids"]) | set(verified["deleted_offer_ids"]))
+        del_portfolio = sorted(set(user["deleted_portfolio_ids"]) | set(verified["deleted_portfolio_ids"]))
+
+        del_rules_set = set(del_rules)
+        del_offers_set = set(del_offers)
+        del_portfolio_set = set(del_portfolio)
+
         now = utc_now_iso()
 
-        # Seed 3 starter sniper rules if empty
-        async with self.conn.execute("SELECT COUNT(*) AS c FROM sniper_rules") as cur:
-            row = await cur.fetchone()
-        if row and row["c"] == 0:
-            starter_rules = [
-                (
-                    "Eternal Rose — Фліп від -15%",
-                    "eternalrose",
-                    "Eternal Rose",
-                    "",
-                    "",
-                    45.0,
-                    15.0,
-                    0,
-                    json.dumps(["portals", "getgems", "mrkt", "tonnel"]),
-                    "alert",
-                    1,
-                    0,
-                    now,
-                ),
-                (
-                    "Рідкісні комбо (Monochrome / Gold)",
-                    "",
-                    "Усі колекції",
-                    "",
-                    "",
-                    120.0,
-                    10.0,
-                    1,
-                    json.dumps(["portals", "getgems", "mrkt", "tonnel"]),
-                    "alert",
-                    1,
-                    0,
-                    now,
-                ),
-                (
-                    "Бюджетні фліпи до 25 TON (-18%)",
-                    "",
-                    "Усі колекції",
-                    "",
-                    "",
-                    25.0,
-                    18.0,
-                    0,
-                    json.dumps(["portals", "tonnel"]),
-                    "alert",
-                    1,
-                    0,
-                    now,
-                ),
-            ]
-            await self.conn.executemany(
-                """
-                INSERT INTO sniper_rules (
-                    name, collection_short_name, collection_name, model_filter,
-                    backdrop_filter, max_price, min_discount_percent, rare_combo_only,
-                    markets_json, mode, enabled, hits_count, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                starter_rules,
-            )
+        # 1. Reconcile sniper_rules for this user
+        await self.conn.execute("DELETE FROM sniper_rules WHERE user_id = ?", (uid,))
+        for r in verified["rules"]:
+            if not isinstance(r, dict) or not r.get("name"):
+                continue
+            rid = int(r["id"]) if r.get("id") is not None else None
+            if rid is not None and rid in del_rules_set:
+                continue
+            markets_json = json.dumps(r.get("markets") or ["portals", "getgems", "mrkt", "tonnel"])
+            can_use_id = False
+            if rid is not None:
+                async with self.conn.execute("SELECT id FROM sniper_rules WHERE id = ?", (rid,)) as cur:
+                    can_use_id = (await cur.fetchone()) is None
+            if can_use_id and rid is not None:
+                await self.conn.execute(
+                    """
+                    INSERT INTO sniper_rules (
+                        id, user_id, name, collection_short_name, collection_name, model_filter,
+                        backdrop_filter, max_price, min_discount_percent, rare_combo_only,
+                        markets_json, mode, enabled, hits_count, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        rid,
+                        uid,
+                        str(r["name"]),
+                        str(r.get("collection_short_name") or "").strip().lower(),
+                        str(r.get("collection_name") or "Усі колекції"),
+                        str(r.get("model_filter") or "").strip(),
+                        str(r.get("backdrop_filter") or "").strip(),
+                        float(r.get("max_price", 500.0)),
+                        float(r.get("min_discount_percent", 15.0)),
+                        1 if r.get("rare_combo_only") else 0,
+                        markets_json,
+                        str(r.get("mode") or "alert"),
+                        1 if r.get("enabled", True) else 0,
+                        int(r.get("hits_count") or 0),
+                        str(r.get("created_at") or now),
+                    ),
+                )
+            else:
+                await self.conn.execute(
+                    """
+                    INSERT INTO sniper_rules (
+                        user_id, name, collection_short_name, collection_name, model_filter,
+                        backdrop_filter, max_price, min_discount_percent, rare_combo_only,
+                        markets_json, mode, enabled, hits_count, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        uid,
+                        str(r["name"]),
+                        str(r.get("collection_short_name") or "").strip().lower(),
+                        str(r.get("collection_name") or "Усі колекції"),
+                        str(r.get("model_filter") or "").strip(),
+                        str(r.get("backdrop_filter") or "").strip(),
+                        float(r.get("max_price", 500.0)),
+                        float(r.get("min_discount_percent", 15.0)),
+                        1 if r.get("rare_combo_only") else 0,
+                        markets_json,
+                        str(r.get("mode") or "alert"),
+                        1 if r.get("enabled", True) else 0,
+                        int(r.get("hits_count") or 0),
+                        str(r.get("created_at") or now),
+                    ),
+                )
 
-        # Seed 2 realistic offers if empty
-        async with self.conn.execute("SELECT COUNT(*) AS c FROM user_offers") as cur:
-            row = await cur.fetchone()
-        if row and row["c"] == 0:
-            starter_offers = [
-                ("eternalrose", "Eternal Rose", "portals", 24.8, 27.5, 1, "active", now, now),
-                ("plushpepe", "Plush Pepe", "getgems", 415.0, 445.0, 1, "active", now, now),
-            ]
-            await self.conn.executemany(
-                """
-                INSERT INTO user_offers (
-                    collection_short_name, collection_name, market, bid_price,
-                    max_bid, auto_outbid, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                starter_offers,
-            )
+        # 2. Reconcile user_offers for this user
+        await self.conn.execute("DELETE FROM user_offers WHERE user_id = ?", (uid,))
+        for o in verified["offers"]:
+            if not isinstance(o, dict) or not o.get("collection_short_name"):
+                continue
+            oid = int(o["id"]) if o.get("id") is not None else None
+            if oid is not None and oid in del_offers_set:
+                continue
+            can_use_id = False
+            if oid is not None:
+                async with self.conn.execute("SELECT id FROM user_offers WHERE id = ?", (oid,)) as cur:
+                    can_use_id = (await cur.fetchone()) is None
+            if can_use_id and oid is not None:
+                await self.conn.execute(
+                    """
+                    INSERT INTO user_offers (
+                        id, user_id, collection_short_name, collection_name, market,
+                        bid_price, max_bid, auto_outbid, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        oid,
+                        uid,
+                        str(o["collection_short_name"]).strip().lower(),
+                        str(o.get("collection_name") or o["collection_short_name"]),
+                        str(o.get("market") or "portals"),
+                        round(float(o.get("bid_price", 1.0)), 2),
+                        round(float(o.get("max_bid", o.get("bid_price", 1.0))), 2),
+                        1 if o.get("auto_outbid", True) else 0,
+                        str(o.get("status") or "active"),
+                        str(o.get("created_at") or now),
+                        str(o.get("updated_at") or now),
+                    ),
+                )
+            else:
+                await self.conn.execute(
+                    """
+                    INSERT INTO user_offers (
+                        user_id, collection_short_name, collection_name, market,
+                        bid_price, max_bid, auto_outbid, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        uid,
+                        str(o["collection_short_name"]).strip().lower(),
+                        str(o.get("collection_name") or o["collection_short_name"]),
+                        str(o.get("market") or "portals"),
+                        round(float(o.get("bid_price", 1.0)), 2),
+                        round(float(o.get("max_bid", o.get("bid_price", 1.0))), 2),
+                        1 if o.get("auto_outbid", True) else 0,
+                        str(o.get("status") or "active"),
+                        str(o.get("created_at") or now),
+                        str(o.get("updated_at") or now),
+                    ),
+                )
 
+        # 3. Reconcile portfolio_items for this user
+        await self.conn.execute("DELETE FROM portfolio_items WHERE user_id = ?", (uid,))
+        for p in verified["portfolio"]:
+            if not isinstance(p, dict) or not p.get("short_name"):
+                continue
+            pid = int(p["id"]) if p.get("id") is not None else None
+            if pid is not None and pid in del_portfolio_set:
+                continue
+            short_name = str(p["short_name"]).strip().lower().replace(" ", "")
+            number = int(p.get("number") or 1)
+            col_name = str(p.get("collection_name") or short_name.title())
+            tg_id = str(p.get("tg_id") or f"{col_name.replace(' ', '')}-{number}")
+            buy_price = round(float(p.get("buy_price", 1.0)), 2)
+            listed_price = round(float(p.get("listed_price") or round(buy_price * 1.18, 2)), 2)
+            min_guard = round(float(p.get("min_price_guard") or round(buy_price * 1.06, 2)), 2)
+            photo_url = str(p.get("photo_url") or f"https://nft.fragment.com/collection/{short_name}.webp")
+            comp_override = float(p["competitor_override"]) if p.get("competitor_override") is not None else None
+
+            can_use_id = False
+            if pid is not None:
+                async with self.conn.execute("SELECT id FROM portfolio_items WHERE id = ?", (pid,)) as cur:
+                    can_use_id = (await cur.fetchone()) is None
+
+            if can_use_id and pid is not None:
+                await self.conn.execute(
+                    """
+                    INSERT INTO portfolio_items (
+                        id, user_id, tg_id, collection_name, short_name, number, photo_url,
+                        buy_price, listed_price, market, auto_undercut_enabled,
+                        undercut_mode, min_price_guard, undercut_step, status,
+                        competitor_override, is_undercut_by_competitor, last_undercut_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        pid,
+                        uid,
+                        tg_id,
+                        col_name,
+                        short_name,
+                        number,
+                        photo_url,
+                        buy_price,
+                        listed_price,
+                        str(p.get("market") or "portals"),
+                        1 if p.get("auto_undercut_enabled", True) else 0,
+                        str(p.get("undercut_mode") or "notify"),
+                        min_guard,
+                        float(p.get("undercut_step", 0.05)),
+                        str(p.get("status") or "listed"),
+                        comp_override,
+                        1 if p.get("is_undercut_by_competitor") else 0,
+                        p.get("last_undercut_at"),
+                        str(p.get("created_at") or now),
+                    ),
+                )
+            else:
+                await self.conn.execute(
+                    """
+                    INSERT INTO portfolio_items (
+                        user_id, tg_id, collection_name, short_name, number, photo_url,
+                        buy_price, listed_price, market, auto_undercut_enabled,
+                        undercut_mode, min_price_guard, undercut_step, status,
+                        competitor_override, is_undercut_by_competitor, last_undercut_at, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        uid,
+                        tg_id,
+                        col_name,
+                        short_name,
+                        number,
+                        photo_url,
+                        buy_price,
+                        listed_price,
+                        str(p.get("market") or "portals"),
+                        1 if p.get("auto_undercut_enabled", True) else 0,
+                        str(p.get("undercut_mode") or "notify"),
+                        min_guard,
+                        float(p.get("undercut_step", 0.05)),
+                        str(p.get("status") or "listed"),
+                        comp_override,
+                        1 if p.get("is_undercut_by_competitor") else 0,
+                        p.get("last_undercut_at"),
+                        str(p.get("created_at") or now),
+                    ),
+                )
+
+        # 4. Update user's state_version & tombstones
+        await self.conn.execute(
+            """
+            UPDATE users
+            SET state_version = ?,
+                deleted_rule_ids_json = ?,
+                deleted_offer_ids_json = ?,
+                deleted_portfolio_ids_json = ?,
+                last_seen_at = ?
+            WHERE tg_user_id = ?
+            """,
+            (
+                incoming_version,
+                json.dumps(del_rules),
+                json.dumps(del_offers),
+                json.dumps(del_portfolio),
+                now,
+                uid,
+            ),
+        )
         await self.conn.commit()
+        return True
 
     # -------------------- SETTINGS --------------------
 
@@ -292,6 +682,7 @@ class Database:
             markets = ["portals", "getgems", "mrkt", "tonnel"]
         return {
             "id": row["id"],
+            "user_id": str(row["user_id"] if "user_id" in row.keys() else DEFAULT_ADMIN_USER_ID),
             "name": row["name"],
             "collection_short_name": row["collection_short_name"] or "",
             "collection_name": row["collection_name"] or "Усі колекції",
@@ -307,28 +698,45 @@ class Database:
             "created_at": row["created_at"],
         }
 
-    async def list_sniper_rules(self) -> list[dict[str, Any]]:
-        async with self.conn.execute("SELECT * FROM sniper_rules ORDER BY id DESC") as cur:
+    async def list_sniper_rules(self, user_id: str = DEFAULT_ADMIN_USER_ID) -> list[dict[str, Any]]:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        async with self.conn.execute(
+            "SELECT * FROM sniper_rules WHERE user_id = ? ORDER BY id DESC",
+            (uid,),
+        ) as cur:
             rows = await cur.fetchall()
         return [self._row_to_rule(r) for r in rows]
 
-    async def get_sniper_rule(self, rule_id: int) -> dict[str, Any] | None:
-        async with self.conn.execute("SELECT * FROM sniper_rules WHERE id = ?", (rule_id,)) as cur:
-            row = await cur.fetchone()
+    async def get_sniper_rule(self, rule_id: int, user_id: str | None = None) -> dict[str, Any] | None:
+        if user_id is not None:
+            async with self.conn.execute(
+                "SELECT * FROM sniper_rules WHERE id = ? AND user_id = ?",
+                (rule_id, str(user_id).strip()),
+            ) as cur:
+                row = await cur.fetchone()
+        else:
+            async with self.conn.execute("SELECT * FROM sniper_rules WHERE id = ?", (rule_id,)) as cur:
+                row = await cur.fetchone()
         return self._row_to_rule(row) if row else None
 
-    async def create_sniper_rule(self, data: dict[str, Any]) -> dict[str, Any]:
+    async def create_sniper_rule(
+        self,
+        data: dict[str, Any],
+        user_id: str = DEFAULT_ADMIN_USER_ID,
+    ) -> dict[str, Any]:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
         now = utc_now_iso()
         markets_json = json.dumps(data.get("markets") or ["portals", "getgems", "mrkt", "tonnel"])
         cur = await self.conn.execute(
             """
             INSERT INTO sniper_rules (
-                name, collection_short_name, collection_name, model_filter,
+                user_id, name, collection_short_name, collection_name, model_filter,
                 backdrop_filter, max_price, min_discount_percent, rare_combo_only,
                 markets_json, mode, enabled, hits_count, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
             """,
             (
+                uid,
                 data["name"],
                 data.get("collection_short_name", "").strip().lower(),
                 data.get("collection_name") or "Усі колекції",
@@ -344,12 +752,19 @@ class Database:
             ),
         )
         await self.conn.commit()
-        created = await self.get_sniper_rule(cur.lastrowid)
+        created = await self.get_sniper_rule(cur.lastrowid, user_id=uid)
         assert created is not None
+        await self._bump_user_state(uid, restored_rule_id=created["id"])
         return created
 
-    async def update_sniper_rule(self, rule_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
-        existing = await self.get_sniper_rule(rule_id)
+    async def update_sniper_rule(
+        self,
+        rule_id: int,
+        updates: dict[str, Any],
+        user_id: str = DEFAULT_ADMIN_USER_ID,
+    ) -> dict[str, Any] | None:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        existing = await self.get_sniper_rule(rule_id, user_id=uid)
         if not existing:
             return None
         fields: list[str] = []
@@ -379,13 +794,14 @@ class Database:
             fields.append("markets_json = ?")
             values.append(json.dumps(updates["markets"]))
         if fields:
-            values.append(rule_id)
+            values.extend([rule_id, uid])
             await self.conn.execute(
-                f"UPDATE sniper_rules SET {', '.join(fields)} WHERE id = ?",
+                f"UPDATE sniper_rules SET {', '.join(fields)} WHERE id = ? AND user_id = ?",
                 values,
             )
             await self.conn.commit()
-        return await self.get_sniper_rule(rule_id)
+            await self._bump_user_state(uid)
+        return await self.get_sniper_rule(rule_id, user_id=uid)
 
     async def increment_rule_hits(self, rule_id: int) -> None:
         await self.conn.execute(
@@ -394,10 +810,16 @@ class Database:
         )
         await self.conn.commit()
 
-    async def delete_sniper_rule(self, rule_id: int) -> bool:
-        cur = await self.conn.execute("DELETE FROM sniper_rules WHERE id = ?", (rule_id,))
+    async def delete_sniper_rule(self, rule_id: int, user_id: str = DEFAULT_ADMIN_USER_ID) -> bool:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        cur = await self.conn.execute(
+            "DELETE FROM sniper_rules WHERE id = ? AND user_id = ?",
+            (rule_id, uid),
+        )
         await self.conn.commit()
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
+        await self._bump_user_state(uid, deleted_rule_id=rule_id)
+        return deleted
 
     # -------------------- PORTFOLIO --------------------
 
@@ -405,6 +827,7 @@ class Database:
     def _row_to_portfolio(row: aiosqlite.Row) -> dict[str, Any]:
         return {
             "id": row["id"],
+            "user_id": str(row["user_id"] if "user_id" in row.keys() else DEFAULT_ADMIN_USER_ID),
             "tg_id": row["tg_id"],
             "collection_name": row["collection_name"],
             "short_name": row["short_name"],
@@ -424,17 +847,33 @@ class Database:
             "created_at": row["created_at"],
         }
 
-    async def list_portfolio_items(self) -> list[dict[str, Any]]:
-        async with self.conn.execute("SELECT * FROM portfolio_items ORDER BY id DESC") as cur:
+    async def list_portfolio_items(self, user_id: str = DEFAULT_ADMIN_USER_ID) -> list[dict[str, Any]]:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        async with self.conn.execute(
+            "SELECT * FROM portfolio_items WHERE user_id = ? ORDER BY id DESC",
+            (uid,),
+        ) as cur:
             rows = await cur.fetchall()
         return [self._row_to_portfolio(r) for r in rows]
 
-    async def get_portfolio_item(self, item_id: int) -> dict[str, Any] | None:
-        async with self.conn.execute("SELECT * FROM portfolio_items WHERE id = ?", (item_id,)) as cur:
-            row = await cur.fetchone()
+    async def get_portfolio_item(self, item_id: int, user_id: str | None = None) -> dict[str, Any] | None:
+        if user_id is not None:
+            async with self.conn.execute(
+                "SELECT * FROM portfolio_items WHERE id = ? AND user_id = ?",
+                (item_id, str(user_id).strip()),
+            ) as cur:
+                row = await cur.fetchone()
+        else:
+            async with self.conn.execute("SELECT * FROM portfolio_items WHERE id = ?", (item_id,)) as cur:
+                row = await cur.fetchone()
         return self._row_to_portfolio(row) if row else None
 
-    async def create_portfolio_item(self, data: dict[str, Any]) -> dict[str, Any]:
+    async def create_portfolio_item(
+        self,
+        data: dict[str, Any],
+        user_id: str = DEFAULT_ADMIN_USER_ID,
+    ) -> dict[str, Any]:
+        uid = str(user_id or data.get("user_id") or DEFAULT_ADMIN_USER_ID).strip()
         now = utc_now_iso()
         short_name = str(data["short_name"]).strip().lower().replace(" ", "")
         number = int(data.get("number") or 1)
@@ -446,13 +885,14 @@ class Database:
         cur = await self.conn.execute(
             """
             INSERT INTO portfolio_items (
-                tg_id, collection_name, short_name, number, photo_url,
+                user_id, tg_id, collection_name, short_name, number, photo_url,
                 buy_price, listed_price, market, auto_undercut_enabled,
                 undercut_mode, min_price_guard, undercut_step, status,
                 competitor_override, is_undercut_by_competitor, last_undercut_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?)
             """,
             (
+                uid,
                 tg_id,
                 data["collection_name"],
                 short_name,
@@ -470,14 +910,21 @@ class Database:
             ),
         )
         await self.conn.commit()
-        item = await self.get_portfolio_item(cur.lastrowid)
+        item = await self.get_portfolio_item(cur.lastrowid, user_id=uid)
         assert item is not None
+        await self._bump_user_state(uid, restored_portfolio_id=item["id"])
         return item
 
-    async def update_portfolio_item(self, item_id: int, updates: dict[str, Any]) -> dict[str, Any] | None:
-        existing = await self.get_portfolio_item(item_id)
+    async def update_portfolio_item(
+        self,
+        item_id: int,
+        updates: dict[str, Any],
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        existing = await self.get_portfolio_item(item_id, user_id=user_id)
         if not existing:
             return None
+        uid = existing["user_id"]
         allowed = {
             "listed_price",
             "market",
@@ -500,18 +947,25 @@ class Database:
             fields.append(f"{k} = ?")
             values.append(v)
         if fields:
-            values.append(item_id)
+            values.extend([item_id, uid])
             await self.conn.execute(
-                f"UPDATE portfolio_items SET {', '.join(fields)} WHERE id = ?",
+                f"UPDATE portfolio_items SET {', '.join(fields)} WHERE id = ? AND user_id = ?",
                 values,
             )
             await self.conn.commit()
-        return await self.get_portfolio_item(item_id)
+            await self._bump_user_state(uid)
+        return await self.get_portfolio_item(item_id, user_id=uid)
 
-    async def delete_portfolio_item(self, item_id: int) -> bool:
-        cur = await self.conn.execute("DELETE FROM portfolio_items WHERE id = ?", (item_id,))
+    async def delete_portfolio_item(self, item_id: int, user_id: str = DEFAULT_ADMIN_USER_ID) -> bool:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        cur = await self.conn.execute(
+            "DELETE FROM portfolio_items WHERE id = ? AND user_id = ?",
+            (item_id, uid),
+        )
         await self.conn.commit()
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
+        await self._bump_user_state(uid, deleted_portfolio_id=item_id)
+        return deleted
 
     # -------------------- USER OFFERS --------------------
 
@@ -519,6 +973,7 @@ class Database:
     def _row_to_offer(row: aiosqlite.Row) -> dict[str, Any]:
         return {
             "id": row["id"],
+            "user_id": str(row["user_id"] if "user_id" in row.keys() else DEFAULT_ADMIN_USER_ID),
             "collection_short_name": row["collection_short_name"],
             "collection_name": row["collection_name"],
             "market": row["market"],
@@ -530,26 +985,43 @@ class Database:
             "updated_at": row["updated_at"],
         }
 
-    async def list_offers(self) -> list[dict[str, Any]]:
-        async with self.conn.execute("SELECT * FROM user_offers ORDER BY id DESC") as cur:
+    async def list_offers(self, user_id: str = DEFAULT_ADMIN_USER_ID) -> list[dict[str, Any]]:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        async with self.conn.execute(
+            "SELECT * FROM user_offers WHERE user_id = ? ORDER BY id DESC",
+            (uid,),
+        ) as cur:
             rows = await cur.fetchall()
         return [self._row_to_offer(r) for r in rows]
 
-    async def get_offer(self, offer_id: int) -> dict[str, Any] | None:
-        async with self.conn.execute("SELECT * FROM user_offers WHERE id = ?", (offer_id,)) as cur:
-            row = await cur.fetchone()
+    async def get_offer(self, offer_id: int, user_id: str | None = None) -> dict[str, Any] | None:
+        if user_id is not None:
+            async with self.conn.execute(
+                "SELECT * FROM user_offers WHERE id = ? AND user_id = ?",
+                (offer_id, str(user_id).strip()),
+            ) as cur:
+                row = await cur.fetchone()
+        else:
+            async with self.conn.execute("SELECT * FROM user_offers WHERE id = ?", (offer_id,)) as cur:
+                row = await cur.fetchone()
         return self._row_to_offer(row) if row else None
 
-    async def create_offer(self, data: dict[str, Any]) -> dict[str, Any]:
+    async def create_offer(
+        self,
+        data: dict[str, Any],
+        user_id: str = DEFAULT_ADMIN_USER_ID,
+    ) -> dict[str, Any]:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
         now = utc_now_iso()
         cur = await self.conn.execute(
             """
             INSERT INTO user_offers (
-                collection_short_name, collection_name, market, bid_price,
+                user_id, collection_short_name, collection_name, market, bid_price,
                 max_bid, auto_outbid, status, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
             """,
             (
+                uid,
                 str(data["collection_short_name"]).strip().lower(),
                 data["collection_name"],
                 data.get("market", "portals"),
@@ -561,27 +1033,41 @@ class Database:
             ),
         )
         await self.conn.commit()
-        offer = await self.get_offer(cur.lastrowid)
+        offer = await self.get_offer(cur.lastrowid, user_id=uid)
         assert offer is not None
+        await self._bump_user_state(uid, restored_offer_id=offer["id"])
         return offer
 
-    async def bump_offer(self, offer_id: int, step: float = 0.1) -> dict[str, Any] | None:
-        offer = await self.get_offer(offer_id)
+    async def bump_offer(
+        self,
+        offer_id: int,
+        step: float = 0.1,
+        user_id: str = DEFAULT_ADMIN_USER_ID,
+    ) -> dict[str, Any] | None:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        offer = await self.get_offer(offer_id, user_id=uid)
         if not offer:
             return None
         new_bid = round(min(offer["max_bid"], offer["bid_price"] + step), 2)
         now = utc_now_iso()
         await self.conn.execute(
-            "UPDATE user_offers SET bid_price = ?, updated_at = ? WHERE id = ?",
-            (new_bid, now, offer_id),
+            "UPDATE user_offers SET bid_price = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (new_bid, now, offer_id, uid),
         )
         await self.conn.commit()
-        return await self.get_offer(offer_id)
+        await self._bump_user_state(uid)
+        return await self.get_offer(offer_id, user_id=uid)
 
-    async def delete_offer(self, offer_id: int) -> bool:
-        cur = await self.conn.execute("DELETE FROM user_offers WHERE id = ?", (offer_id,))
+    async def delete_offer(self, offer_id: int, user_id: str = DEFAULT_ADMIN_USER_ID) -> bool:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        cur = await self.conn.execute(
+            "DELETE FROM user_offers WHERE id = ? AND user_id = ?",
+            (offer_id, uid),
+        )
         await self.conn.commit()
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
+        await self._bump_user_state(uid, deleted_offer_id=offer_id)
+        return deleted
 
     # -------------------- ALERT LOGS --------------------
 
@@ -597,16 +1083,19 @@ class Database:
         rule_id: int | None = None,
         rule_name: str = "",
         listing_id: str = "",
+        user_id: str = DEFAULT_ADMIN_USER_ID,
     ) -> dict[str, Any]:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
         now = utc_now_iso()
         cur = await self.conn.execute(
             """
             INSERT INTO alert_logs (
-                alert_type, rule_id, rule_name, listing_id, title, summary,
+                user_id, alert_type, rule_id, rule_name, listing_id, title, summary,
                 payload_json, telegram_html, telegram_sent, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
+                uid,
                 alert_type,
                 rule_id,
                 rule_name,
@@ -623,6 +1112,7 @@ class Database:
         is_listing = isinstance(payload, dict) and "collection_name" in payload and "fair_value" in payload
         return {
             "id": cur.lastrowid,
+            "user_id": uid,
             "alert_type": alert_type,
             "rule_id": rule_id,
             "rule_name": rule_name,
@@ -638,9 +1128,15 @@ class Database:
             "created_at": now,
         }
 
-    async def list_alert_logs(self, limit: int = 40) -> list[dict[str, Any]]:
+    async def list_alert_logs(
+        self,
+        limit: int = 40,
+        user_id: str = DEFAULT_ADMIN_USER_ID,
+    ) -> list[dict[str, Any]]:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
         async with self.conn.execute(
-            "SELECT * FROM alert_logs ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT * FROM alert_logs WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (uid, limit),
         ) as cur:
             rows = await cur.fetchall()
         results: list[dict[str, Any]] = []
@@ -653,6 +1149,7 @@ class Database:
             results.append(
                 {
                     "id": r["id"],
+                    "user_id": str(r["user_id"] if "user_id" in r.keys() else uid),
                     "alert_type": r["alert_type"],
                     "rule_id": r["rule_id"],
                     "rule_name": r["rule_name"],
@@ -699,21 +1196,30 @@ class Database:
 
     # -------------------- TRADE LEDGER (DAILY RISK LIMIT) --------------------
 
-    async def record_trade(self, listing_id: str, short_name: str, price_ton: float, dry_run: bool) -> None:
+    async def record_trade(
+        self,
+        listing_id: str,
+        short_name: str,
+        price_ton: float,
+        dry_run: bool,
+        user_id: str = DEFAULT_ADMIN_USER_ID,
+    ) -> None:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
         await self.conn.execute(
             """
-            INSERT INTO trade_ledger (listing_id, short_name, price_ton, dry_run, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO trade_ledger (user_id, listing_id, short_name, price_ton, dry_run, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (listing_id, short_name, float(price_ton), 1 if dry_run else 0, utc_now_iso()),
+            (uid, listing_id, short_name, float(price_ton), 1 if dry_run else 0, utc_now_iso()),
         )
         await self.conn.commit()
 
-    async def get_today_spent_ton(self) -> float:
+    async def get_today_spent_ton(self, user_id: str = DEFAULT_ADMIN_USER_ID) -> float:
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
         today_prefix = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         async with self.conn.execute(
-            "SELECT COALESCE(SUM(price_ton), 0) AS total FROM trade_ledger WHERE created_at LIKE ?",
-            (f"{today_prefix}%",),
+            "SELECT COALESCE(SUM(price_ton), 0) AS total FROM trade_ledger WHERE user_id = ? AND created_at LIKE ?",
+            (uid, f"{today_prefix}%"),
         ) as cur:
             row = await cur.fetchone()
         return float(row["total"]) if row else 0.0

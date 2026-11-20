@@ -10,6 +10,7 @@ from loguru import logger
 from backend.config import base_settings
 from backend.database import db, utc_now_iso
 from backend.services.analytics_engine import analytics_engine
+from backend.services.auth_service import DEFAULT_ADMIN_USER_ID
 from backend.services.multi_market import MARKET_FEES
 from backend.services.ws_manager import ws_manager
 
@@ -45,9 +46,10 @@ class UndercutEngine:
                 pass
             self._task = None
 
-    async def build_enriched_portfolio(self) -> dict[str, Any]:
+    async def build_enriched_portfolio(self, user_id: str = DEFAULT_ADMIN_USER_ID) -> dict[str, Any]:
         """Return portfolio summary + fully enriched items matching API_CONTRACT.md."""
-        raw_items = await db.list_portfolio_items()
+        uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+        raw_items = await db.list_portfolio_items(user_id=uid)
         collections = await analytics_engine.get_collections_summary(limit=100)
         col_by_short = {c.short_name: c for c in collections}
 
@@ -121,6 +123,7 @@ class UndercutEngine:
             enriched_items.append(
                 {
                     "id": row["id"],
+                    "user_id": row.get("user_id", uid),
                     "tg_id": row["tg_id"],
                     "collection_name": row["collection_name"],
                     "short_name": row["short_name"],
@@ -164,16 +167,29 @@ class UndercutEngine:
             "items": enriched_items,
         }
 
-    async def get_enriched_item(self, item_id: int) -> dict[str, Any] | None:
-        portfolio = await self.build_enriched_portfolio()
+    async def get_enriched_item(
+        self,
+        item_id: int,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        raw = await db.get_portfolio_item(item_id, user_id=user_id)
+        if not raw:
+            return None
+        uid = raw.get("user_id") or user_id or DEFAULT_ADMIN_USER_ID
+        portfolio = await self.build_enriched_portfolio(user_id=uid)
         return next((i for i in portfolio["items"] if i["id"] == item_id), None)
 
-    async def apply_undercut(self, item_id: int) -> dict[str, Any]:
+    async def apply_undercut(
+        self,
+        item_id: int,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
         """Apply -step TON below competitor price (strictly respecting min_price_guard)."""
-        enriched = await self.get_enriched_item(item_id)
+        enriched = await self.get_enriched_item(item_id, user_id=user_id)
         if not enriched:
             raise ValueError("Лот у портфелі не знайдено")
 
+        uid = str(enriched.get("user_id") or user_id or DEFAULT_ADMIN_USER_ID).strip()
         old_price = enriched["listed_price"]
         new_price = round(
             max(enriched["min_price_guard"], enriched["competitor_price"] - enriched["undercut_step"]),
@@ -192,8 +208,9 @@ class UndercutEngine:
                 "is_undercut_by_competitor": False,
                 "last_undercut_at": now,
             },
+            user_id=uid,
         )
-        updated = await self.get_enriched_item(item_id)
+        updated = await self.get_enriched_item(item_id, user_id=uid)
         assert updated is not None
 
         guard_note = " (досягнуто захисний мінімум!)" if hit_guard else ""
@@ -207,6 +224,7 @@ class UndercutEngine:
             payload=updated,
             telegram_html=f"<b>GiftKit · Ціну оновлено</b>\n{msg}",
             telegram_sent=False,
+            user_id=uid,
         )
         await ws_manager.broadcast("undercut_alert", {"action": "applied", "item": updated, "alert": alert_log})
         return {
@@ -217,12 +235,18 @@ class UndercutEngine:
             "message": msg,
         }
 
-    async def simulate_competitor_undercut(self, item_id: int, drop_ton: float = 0.1) -> dict[str, Any]:
+    async def simulate_competitor_undercut(
+        self,
+        item_id: int,
+        drop_ton: float = 0.1,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
         """Simulate a competitor listing below our price to test Auto-Undercut live."""
-        enriched = await self.get_enriched_item(item_id)
+        enriched = await self.get_enriched_item(item_id, user_id=user_id)
         if not enriched:
             raise ValueError("Лот у портфелі не знайдено")
 
+        uid = str(enriched.get("user_id") or user_id or DEFAULT_ADMIN_USER_ID).strip()
         sim_competitor = round(max(0.1, enriched["listed_price"] - drop_ton), 2)
         await db.update_portfolio_item(
             item_id,
@@ -231,8 +255,9 @@ class UndercutEngine:
                 "is_undercut_by_competitor": True,
                 "status": "listed",
             },
+            user_id=uid,
         )
-        refreshed = await self.get_enriched_item(item_id)
+        refreshed = await self.get_enriched_item(item_id, user_id=uid)
         assert refreshed is not None
 
         # React according to configured mode & Thin Floor Protection
@@ -248,7 +273,7 @@ class UndercutEngine:
                 await ws_manager.broadcast("undercut_alert", {"action": action, "item": refreshed, "message": msg})
                 return {"item": refreshed, "action_taken": action, "message": msg}
             else:
-                res = await self.apply_undercut(item_id)
+                res = await self.apply_undercut(item_id, user_id=uid)
                 return {
                     "item": res["item"],
                     "action_taken": "auto_undercut",
@@ -275,6 +300,7 @@ class UndercutEngine:
             payload=refreshed,
             telegram_html=f"<b>GiftKit · Конкурент перебив ваш лот</b>\n{msg}",
             telegram_sent=tg_sent,
+            user_id=uid,
         )
         await ws_manager.broadcast("undercut_alert", {"action": "notify", "item": refreshed, "message": msg})
         return {"item": refreshed, "action_taken": "notify", "message": msg}
@@ -295,11 +321,15 @@ class UndercutEngine:
 
             if item["undercut_mode"] == "auto" and not item["thin_floor_warning"]:
                 if item["listed_price"] > item["min_price_guard"]:
-                    await self.apply_undercut(item["id"])
+                    await self.apply_undercut(item["id"], user_id=item.get("user_id"))
                     continue
 
             # Notify mode or thin floor protection triggered — update UI state silently without spamming Telegram
-            await db.update_portfolio_item(item["id"], {"is_undercut_by_competitor": True})
+            await db.update_portfolio_item(
+                item["id"],
+                {"is_undercut_by_competitor": True},
+                user_id=item.get("user_id"),
+            )
             await ws_manager.broadcast("undercut_alert", {"action": "notify", "item": item})
 
     async def _loop(self) -> None:

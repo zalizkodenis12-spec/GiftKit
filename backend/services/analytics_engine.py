@@ -766,7 +766,7 @@ class AnalyticsEngine:
                                     "floor_price": str(c.floor_price),
                                     "attributes": [
                                         {"type": "model", "value": "Golden Shine" if idx % 2 == 0 else "Obsidian", "rarity_per_mille": 1.2},
-                                        {"type": "backdrop", "value": "Old Gold" if idx % 2 == 0 else "Midnight Black", "rarity_per_mille": 1.4},
+                                        {"type": "backdrop", "value": "Onyx Black" if idx % 2 == 0 else "Obsidian", "rarity_per_mille": 1.4},
                                     ],
                                     "listed_at": utc_now_iso(),
                                 }
@@ -1080,30 +1080,100 @@ class AnalyticsEngine:
 
     async def get_offer_radar(self, limit: int = 12) -> list[dict[str, Any]]:
         """Bid-Ask Spread Radar showing best collections for profitable limit offers."""
-        collections = await self.get_collections_summary(sort="volume_desc", limit=45)
+        collections, listings = await asyncio.gather(
+            self.get_collections_summary(sort="volume_desc", limit=45),
+            self.get_analyzed_listings(sort="price_asc", limit=60),
+        )
+        listings_by_short: dict[str, AnalyzedListing] = {}
+        for item in listings:
+            if item.short_name not in listings_by_short or item.price < listings_by_short[item.short_name].price:
+                listings_by_short[item.short_name] = item
+
         radar: list[dict[str, Any]] = []
-        for col in collections:
+        for idx, col in enumerate(collections):
             if col.floor_price < 2.0:
                 continue
             recommended_bid = round(col.best_offer + 0.1, 2)
             net_flip = round(col.floor_price * 0.95 - recommended_bid, 2)
             roi = round((net_flip / max(recommended_bid, 0.01)) * 100.0, 1)
-            if net_flip > 0.2:
-                radar.append(
-                    {
-                        "collection_name": col.name,
-                        "short_name": col.short_name,
-                        "photo_url": col.photo_url,
-                        "floor_price": col.floor_price,
-                        "best_offer": col.best_offer,
-                        "recommended_bid": recommended_bid,
-                        "bid_ask_spread_percent": col.bid_ask_spread_percent,
-                        "est_net_profit_ton": net_flip,
-                        "est_roi_percent": roi,
-                        "liquidity_score": col.liquidity_score,
-                        "sales_24h": col.sales_24h,
-                    }
+            if net_flip <= 0.2:
+                continue
+
+            sample_listing = listings_by_short.get(col.short_name)
+            if sample_listing is None:
+                h = _seed_int(f"radar-sample:{col.short_name}")
+                num = 1000 + (h % 8500)
+                fair_val = round(col.floor_price * 1.12, 2)
+                sell_net = round(fair_val * 0.95 - col.floor_price, 2)
+                sell_pct = round((sell_net / max(col.floor_price, 0.01)) * 100.0, 1)
+                disc_pct = round(((fair_val - col.floor_price) / max(fair_val, 0.01)) * 100.0, 1)
+                sample_listing = AnalyzedListing(
+                    id=f"floor-{col.short_name}-{num}",
+                    tg_id=f"{col.name.replace(' ', '')}-{num}",
+                    collection_id=col.id,
+                    collection_name=col.name,
+                    short_name=col.short_name,
+                    number=num,
+                    photo_url=gift_photo_url(col.short_name, num, col.photo_url),
+                    market="portals",
+                    market_url=f"https://portal-market.com/collection/{col.short_name}",
+                    price=col.floor_price,
+                    collection_floor=col.floor_price,
+                    model_floor=col.floor_price,
+                    backdrop_floor=col.floor_price,
+                    fair_value=fair_val,
+                    discount_percent=disc_pct,
+                    net_profit_ton=sell_net,
+                    net_profit_percent=sell_pct,
+                    fee_percent=5.0,
+                    liquidity_score=col.liquidity_score,
+                    sales_24h=col.sales_24h,
+                    best_sell_market="portals",
+                    best_sell_price=fair_val,
+                    verdict="GOOD_DEAL" if disc_pct >= 10.0 else "FAIR",
+                    verdict_label=f"Вигідна угода ({sell_pct:+.0f}%)" if disc_pct >= 10.0 else "Ринкова ціна",
+                    listed_at=utc_now_iso(),
+                    attributes=[
+                        TraitAttribute(
+                            type="model",
+                            value="Floor Model",
+                            rarity_percent=3.5,
+                            trait_floor=col.floor_price,
+                            supply=max(10, int(col.supply * 0.035)),
+                        ),
+                        TraitAttribute(
+                            type="backdrop",
+                            value="Standard Backdrop",
+                            rarity_percent=4.0,
+                            trait_floor=col.floor_price,
+                            supply=max(10, int(col.supply * 0.04)),
+                        ),
+                    ],
+                    recent_sales=generate_recent_sales(col.short_name, col.floor_price, col.sales_24h, 4),
+                    is_live=col.is_live,
                 )
+
+            radar.append(
+                {
+                    "collection_short_name": col.short_name,
+                    "short_name": col.short_name,
+                    "collection_name": col.name,
+                    "photo_url": sample_listing.photo_url or col.photo_url,
+                    "floor_price": col.floor_price,
+                    "best_offer": col.best_offer,
+                    "suggested_offer": recommended_bid,
+                    "recommended_bid": recommended_bid,
+                    "bid_ask_spread_percent": col.bid_ask_spread_percent,
+                    "est_net_profit_ton": net_flip,
+                    "est_roi_percent": roi,
+                    "liquidity_score": col.liquidity_score,
+                    "sales_24h": col.sales_24h,
+                    "market": "portals",
+                    "market_url": sample_listing.market_url,
+                    "sample_listing": sample_listing.model_dump(),
+                }
+            )
+            _ = idx
         radar.sort(key=lambda r: (r["bid_ask_spread_percent"] * (r["liquidity_score"] / 100.0)), reverse=True)
         return radar[:limit]
 

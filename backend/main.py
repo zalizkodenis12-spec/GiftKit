@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import sys
 import types
+import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -28,7 +31,7 @@ else:
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
@@ -46,7 +49,9 @@ from backend.models import (
     UserOfferCreate,
     VisionScoreRequest,
 )
+from backend.services import auth_service
 from backend.services.analytics_engine import analytics_engine
+from backend.services.auth_service import DEFAULT_ADMIN_USER_ID
 from backend.services.getgems_client import getgems_client
 from backend.services.multi_market import multi_market
 from backend.services.portals_client import portals_client
@@ -132,7 +137,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="GiftKit API",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -142,6 +147,7 @@ async def _ensure_db_middleware(request: Request, call_next):
     await db.ensure_initialized()
     return await call_next(request)
 
+
 app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
@@ -150,6 +156,302 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ==============================================================================
+# 0. AUTHENTICATION & CROSS-DEVICE STATE HYDRATION
+# ==============================================================================
+
+
+def _decode_state_header(raw_header: str) -> dict[str, Any] | None:
+    """Decode X-GiftKit-State header supporting raw JSON, URL-encoded JSON, or base64 JSON."""
+    text = (raw_header or "").strip()
+    if not text:
+        return None
+    # 1. Raw JSON
+    if text.startswith("{"):
+        try:
+            obj = json.loads(text)
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            pass
+    # 2. URL-encoded JSON
+    if "%7B" in text or "%22" in text:
+        try:
+            unquoted = urllib.parse.unquote(text)
+            obj = json.loads(unquoted)
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            pass
+    # 3. Base64 / Base64URL JSON
+    try:
+        padded = text + "=" * ((4 - len(text) % 4) % 4)
+        decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        obj = json.loads(decoded)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _public_user_fields(user: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tg_user_id": str(user.get("tg_user_id") or DEFAULT_ADMIN_USER_ID),
+        "username": str(user.get("username") or ""),
+        "first_name": str(user.get("first_name") or ""),
+        "last_name": str(user.get("last_name") or ""),
+        "photo_url": str(user.get("photo_url") or ""),
+    }
+
+
+async def get_request_user(request: Request) -> dict[str, Any]:
+    """Authenticate request via Bearer token, X-Telegram-Init-Data, or X-GiftKit-Auth & hydrate state."""
+    verified_user: dict[str, Any] | None = None
+
+    auth_header = (request.headers.get("Authorization") or "").strip()
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+        verified_user = auth_service.verify_signed_token(token)
+
+    if verified_user is None:
+        gk_auth = (request.headers.get("X-GiftKit-Auth") or "").strip()
+        if gk_auth:
+            verified_user = auth_service.verify_signed_token(gk_auth)
+
+    if verified_user is None:
+        init_data_hdr = (request.headers.get("X-Telegram-Init-Data") or "").strip()
+        if init_data_hdr:
+            verified_user = auth_service.verify_telegram_init_data(init_data_hdr)
+
+    if verified_user is None:
+        q_auth = (request.query_params.get("tg_auth") or "").strip()
+        if q_auth:
+            verified_user = auth_service.verify_signed_token(q_auth)
+
+    state_header_raw = (request.headers.get("X-GiftKit-State") or "").strip()
+    parsed_state_env = _decode_state_header(state_header_raw) if state_header_raw else None
+
+    if verified_user is None and isinstance(parsed_state_env, dict):
+        env_uid = str(parsed_state_env.get("user_id") or "").strip()
+        if env_uid and auth_service.verify_state_envelope(env_uid, parsed_state_env):
+            existing_u = await db.get_user(env_uid)
+            verified_user = existing_u or {"tg_user_id": env_uid}
+
+    if verified_user is not None:
+        user = await db.upsert_user(verified_user)
+        authenticated = True
+    else:
+        default_id = (
+            runtime_config.tg_admin_chat_id.strip()
+            or base_settings.TG_ADMIN_CHAT_ID.strip()
+            or DEFAULT_ADMIN_USER_ID
+        )
+        user = await db.get_user(default_id)
+        if not user:
+            user = await telegram_bot_service.resolve_chat_profile(default_id)
+        authenticated = False
+
+    if isinstance(parsed_state_env, dict):
+        try:
+            await db.import_user_state(user["tg_user_id"], parsed_state_env)
+        except Exception as exc:
+            logger.debug(f"X-GiftKit-State import skipped: {exc}")
+
+    return {
+        **user,
+        "authenticated": authenticated,
+    }
+
+
+@app.post("/api/auth/session")
+async def post_auth_session(
+    request: Request,
+    body: dict[str, Any] | None = Body(default=None),
+) -> dict[str, Any]:
+    """Authenticate Telegram Mini App / Bot deep-link / Bearer token and synchronize state envelope."""
+    payload = body or {}
+    init_data = str(payload.get("init_data") or "").strip()
+    tg_auth = str(payload.get("tg_auth") or "").strip()
+    incoming_envelope = payload.get("state_envelope")
+
+    verified_user: dict[str, Any] | None = None
+
+    if init_data:
+        verified_user = auth_service.verify_telegram_init_data(init_data)
+        if verified_user is None:
+            raise HTTPException(status_code=401, detail="Недійсний підпис Telegram initData")
+    elif tg_auth:
+        verified_user = auth_service.verify_signed_token(tg_auth)
+        if verified_user is None:
+            raise HTTPException(status_code=401, detail="Недійсний токен авторизації tg_auth")
+    else:
+        # Check request headers
+        auth_header = (request.headers.get("Authorization") or "").strip()
+        if auth_header.lower().startswith("bearer "):
+            verified_user = auth_service.verify_signed_token(auth_header[7:].strip())
+        if verified_user is None:
+            gk_auth = (request.headers.get("X-GiftKit-Auth") or "").strip()
+            if gk_auth:
+                verified_user = auth_service.verify_signed_token(gk_auth)
+        if verified_user is None:
+            init_hdr = (request.headers.get("X-Telegram-Init-Data") or "").strip()
+            if init_hdr:
+                verified_user = auth_service.verify_telegram_init_data(init_hdr)
+
+    if verified_user is None and isinstance(incoming_envelope, dict):
+        env_uid = str(incoming_envelope.get("user_id") or "").strip()
+        if env_uid and auth_service.verify_state_envelope(env_uid, incoming_envelope):
+            verified_user = (await db.get_user(env_uid)) or {"tg_user_id": env_uid}
+
+    if verified_user is not None:
+        user = await db.upsert_user(verified_user)
+    else:
+        default_id = (
+            runtime_config.tg_admin_chat_id.strip()
+            or base_settings.TG_ADMIN_CHAT_ID.strip()
+            or DEFAULT_ADMIN_USER_ID
+        )
+        user = await telegram_bot_service.resolve_chat_profile(default_id)
+
+    uid = user["tg_user_id"]
+
+    # Hydrate from header or body state_envelope if newer
+    state_header_raw = (request.headers.get("X-GiftKit-State") or "").strip()
+    header_env = _decode_state_header(state_header_raw) if state_header_raw else None
+    if isinstance(header_env, dict):
+        await db.import_user_state(uid, header_env)
+    if isinstance(incoming_envelope, dict):
+        await db.import_user_state(uid, incoming_envelope)
+
+    session_token = auth_service.create_signed_token(user)
+    state_envelope = await db.export_user_state(uid)
+
+    return {
+        "ok": True,
+        "authenticated": True,
+        "user": _public_user_fields(user),
+        "session_token": session_token,
+        "state_envelope": state_envelope,
+    }
+
+
+@app.get("/api/auth/me")
+async def get_auth_me(request: Request) -> dict[str, Any]:
+    """Return current authenticated user profile and signed state envelope."""
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    state_envelope = await db.export_user_state(uid)
+    return {
+        "ok": True,
+        "authenticated": bool(user.get("authenticated")),
+        "user": _public_user_fields(user),
+        "state_envelope": state_envelope,
+    }
+
+
+@app.post("/api/auth/login-code")
+async def post_auth_login_code() -> dict[str, Any]:
+    """Generate a one-time nonce and @GiftKit_bot deep-link for 1-click browser/PWA login."""
+    nonce = auth_service.create_login_nonce()
+    bot_username = (telegram_bot_service.bot_username or "GiftKit_bot").strip().lstrip("@") or "GiftKit_bot"
+    return {
+        "ok": True,
+        "nonce": nonce,
+        "bot_username": bot_username,
+        "bot_login_url": f"https://t.me/{bot_username}?start=login_{nonce}",
+    }
+
+
+@app.get("/api/auth/poll-login")
+async def get_auth_poll_login(nonce: str = Query(..., min_length=4)) -> dict[str, Any]:
+    """Poll login nonce status; returns session_token, user, and state_envelope once approved in @GiftKit_bot."""
+    approved_user = auth_service.poll_login_nonce(nonce)
+    if not approved_user:
+        return {"ok": True, "ready": False}
+
+    user = await db.upsert_user(approved_user)
+    uid = user["tg_user_id"]
+    session_token = auth_service.create_signed_token(user)
+    state_envelope = await db.export_user_state(uid)
+    return {
+        "ok": True,
+        "ready": True,
+        "authenticated": True,
+        "session_token": session_token,
+        "user": _public_user_fields(user),
+        "state_envelope": state_envelope,
+    }
+
+
+@app.get("/api/auth/avatar/{tg_user_id}")
+async def get_user_avatar(tg_user_id: str) -> Response:
+    """Resolve user's Telegram avatar without exposing TG_BOT_TOKEN."""
+    user = await db.get_user(tg_user_id)
+    if user and user.get("username"):
+        return RedirectResponse(f"https://t.me/i/userpic/320/{user['username']}.jpg")
+    return Response(status_code=204)
+
+
+@app.get("/api/internal/bot-sync")
+async def get_internal_bot_sync(
+    request: Request,
+    user_id: str = Query(default=DEFAULT_ADMIN_USER_ID),
+) -> dict[str, Any]:
+    """Internal endpoint for local @GiftKit_bot process to pull latest user rules from Vercel."""
+    sig = (request.headers.get("X-Bot-Sync-Signature") or "").strip()
+    if not auth_service.verify_bot_sync_signature(sig):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    uid = str(user_id or DEFAULT_ADMIN_USER_ID).strip()
+    return {
+        "ok": True,
+        "user_id": uid,
+        "state_envelope": await db.export_user_state(uid),
+        "rules": await db.list_sniper_rules(user_id=uid),
+    }
+
+
+@app.post("/api/internal/bot-sync")
+async def post_internal_bot_sync(
+    request: Request,
+    body: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    """Internal endpoint for local @GiftKit_bot process to push state & triggered alerts to Vercel."""
+    sig = (request.headers.get("X-Bot-Sync-Signature") or "").strip()
+    if not auth_service.verify_bot_sync_signature(sig):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    uid = str(body.get("user_id") or DEFAULT_ADMIN_USER_ID).strip()
+    envelope = body.get("state_envelope")
+    if isinstance(envelope, dict):
+        await db.import_user_state(uid, envelope)
+
+    alerts = body.get("alerts")
+    if isinstance(alerts, list):
+        existing = await db.list_alert_logs(limit=30, user_id=uid)
+        existing_keys = {(a.get("listing_id"), a.get("rule_id")) for a in existing}
+        for al in alerts:
+            if not isinstance(al, dict):
+                continue
+            key = (al.get("listing_id"), al.get("rule_id"))
+            if key in existing_keys:
+                continue
+            await db.add_alert_log(
+                alert_type=str(al.get("alert_type") or "sniper"),
+                rule_id=al.get("rule_id"),
+                rule_name=str(al.get("rule_name") or ""),
+                listing_id=str(al.get("listing_id") or ""),
+                title=str(al.get("title") or "Снайпер-сигнал"),
+                summary=str(al.get("summary") or ""),
+                payload=al.get("payload") if isinstance(al.get("payload"), dict) else {},
+                telegram_html=str(al.get("telegram_html") or ""),
+                telegram_sent=bool(al.get("telegram_sent", True)),
+                user_id=uid,
+            )
+
+    return {
+        "ok": True,
+        "user_id": uid,
+        "state_envelope": await db.export_user_state(uid),
+    }
 
 
 # ==============================================================================
@@ -169,12 +471,14 @@ async def get_health() -> dict[str, Any]:
 
 
 @app.get("/api/overview")
-async def get_overview() -> dict[str, Any]:
+async def get_overview(request: Request) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
     (ton_usd, ton_change), cols, rules, portfolio, arb = await asyncio.gather(
         getgems_client.get_ton_rate(),
         analytics_engine.get_collections_summary(limit=250),
-        db.list_sniper_rules(),
-        undercut_engine.build_enriched_portfolio(),
+        db.list_sniper_rules(user_id=uid),
+        undercut_engine.build_enriched_portfolio(user_id=uid),
         analytics_engine.get_arbitrage_opportunities(limit=25),
     )
     active_rules = sum(1 for r in rules if r["enabled"])
@@ -368,50 +672,76 @@ async def post_telegram_webhook(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/sniper/rules")
-async def get_sniper_rules() -> dict[str, Any]:
-    rules = await db.list_sniper_rules()
-    return {"rules": rules}
+async def get_sniper_rules(request: Request) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    rules = await db.list_sniper_rules(user_id=uid)
+    state_envelope = await db.export_user_state(uid)
+    return {"rules": rules, "state_envelope": state_envelope}
 
 
 @app.post("/api/sniper/rules")
-async def create_sniper_rule(body: SniperRuleCreate) -> dict[str, Any]:
-    return await db.create_sniper_rule(body.model_dump())
+async def create_sniper_rule(request: Request, body: SniperRuleCreate) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    created = await db.create_sniper_rule(body.model_dump(), user_id=uid)
+    state_envelope = await db.export_user_state(uid)
+    return {**created, "rule": created, "state_envelope": state_envelope}
 
 
 @app.patch("/api/sniper/rules/{rule_id}")
-async def update_sniper_rule(rule_id: int, body: SniperRuleUpdate) -> dict[str, Any]:
-    updated = await db.update_sniper_rule(rule_id, body.model_dump(exclude_none=True))
+async def update_sniper_rule(
+    rule_id: int,
+    request: Request,
+    body: SniperRuleUpdate,
+) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    updated = await db.update_sniper_rule(rule_id, body.model_dump(exclude_none=True), user_id=uid)
     if not updated:
         raise HTTPException(status_code=404, detail="Правило снайпера не знайдено")
-    return updated
+    state_envelope = await db.export_user_state(uid)
+    return {**updated, "rule": updated, "state_envelope": state_envelope}
 
 
 @app.delete("/api/sniper/rules/{rule_id}")
-async def delete_sniper_rule(rule_id: int) -> dict[str, Any]:
-    deleted = await db.delete_sniper_rule(rule_id)
+async def delete_sniper_rule(rule_id: int, request: Request) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    deleted = await db.delete_sniper_rule(rule_id, user_id=uid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Правило снайпера не знайдено")
-    return {"deleted": True, "id": rule_id}
+    state_envelope = await db.export_user_state(uid)
+    return {"deleted": True, "id": rule_id, "state_envelope": state_envelope}
 
 
 @app.get("/api/sniper/alerts")
-async def get_sniper_alerts(limit: int = Query(default=30, ge=1, le=100)) -> dict[str, Any]:
-    alerts = await db.list_alert_logs(limit=limit)
+async def get_sniper_alerts(
+    request: Request,
+    limit: int = Query(default=30, ge=1, le=100),
+) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    alerts = await db.list_alert_logs(limit=limit, user_id=uid)
     return {"alerts": alerts}
 
 
 @app.post("/api/sniper/test-alert")
-async def post_sniper_test_alert() -> dict[str, Any]:
+async def post_sniper_test_alert(request: Request) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
     try:
-        return await sniper_engine.trigger_test_alert()
+        return await sniper_engine.trigger_test_alert(user_id=uid)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/offers")
-async def get_offers() -> dict[str, Any]:
+async def get_offers(request: Request) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
     offers, radar, cols = await asyncio.gather(
-        db.list_offers(),
+        db.list_offers(user_id=uid),
         analytics_engine.get_offer_radar(limit=12),
         analytics_engine.get_collections_summary(limit=100),
     )
@@ -431,32 +761,44 @@ async def get_offers() -> dict[str, Any]:
                 "est_profit_ton": round(floor * 0.95 - o["bid_price"], 2),
             }
         )
-    return {"offers": enriched_offers, "radar": radar}
+    state_envelope = await db.export_user_state(uid)
+    return {"offers": enriched_offers, "radar": radar, "state_envelope": state_envelope}
 
 
 @app.post("/api/offers")
-async def create_offer(body: UserOfferCreate) -> dict[str, Any]:
-    return await db.create_offer(body.model_dump())
+async def create_offer(request: Request, body: UserOfferCreate) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    created = await db.create_offer(body.model_dump(), user_id=uid)
+    state_envelope = await db.export_user_state(uid)
+    return {**created, "offer": created, "state_envelope": state_envelope}
 
 
 @app.post("/api/offers/{offer_id}/outbid")
 async def outbid_offer(
     offer_id: int,
+    request: Request,
     body: OfferOutbidRequest | None = Body(default=None),
 ) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
     step = body.step if body else 0.1
-    updated = await db.bump_offer(offer_id, step=step)
+    updated = await db.bump_offer(offer_id, step=step, user_id=uid)
     if not updated:
         raise HTTPException(status_code=404, detail="Офер не знайдено")
-    return updated
+    state_envelope = await db.export_user_state(uid)
+    return {**updated, "offer": updated, "state_envelope": state_envelope}
 
 
 @app.delete("/api/offers/{offer_id}")
-async def delete_offer(offer_id: int) -> dict[str, Any]:
-    deleted = await db.delete_offer(offer_id)
+async def delete_offer(offer_id: int, request: Request) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    deleted = await db.delete_offer(offer_id, user_id=uid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Офер не знайдено")
-    return {"deleted": True, "id": offer_id}
+    state_envelope = await db.export_user_state(uid)
+    return {"deleted": True, "id": offer_id, "state_envelope": state_envelope}
 
 
 # ==============================================================================
@@ -465,30 +807,50 @@ async def delete_offer(offer_id: int) -> dict[str, Any]:
 
 
 @app.get("/api/portfolio")
-async def get_portfolio() -> dict[str, Any]:
-    return await undercut_engine.build_enriched_portfolio()
+async def get_portfolio(request: Request) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    pf = await undercut_engine.build_enriched_portfolio(user_id=uid)
+    state_envelope = await db.export_user_state(uid)
+    return {**pf, "state_envelope": state_envelope}
 
 
 @app.post("/api/portfolio")
-async def create_portfolio_item(body: PortfolioCreate) -> dict[str, Any]:
-    created = await db.create_portfolio_item(body.model_dump())
-    enriched = await undercut_engine.get_enriched_item(created["id"])
-    return enriched or created
+async def create_portfolio_item(request: Request, body: PortfolioCreate) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    created = await db.create_portfolio_item(body.model_dump(), user_id=uid)
+    enriched = await undercut_engine.get_enriched_item(created["id"], user_id=uid)
+    state_envelope = await db.export_user_state(uid)
+    base = enriched or created
+    return {**base, "state_envelope": state_envelope}
 
 
 @app.patch("/api/portfolio/{item_id}")
-async def update_portfolio_item(item_id: int, body: PortfolioUpdate) -> dict[str, Any]:
-    updated = await db.update_portfolio_item(item_id, body.model_dump(exclude_none=True))
+async def update_portfolio_item(
+    item_id: int,
+    request: Request,
+    body: PortfolioUpdate,
+) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    updated = await db.update_portfolio_item(item_id, body.model_dump(exclude_none=True), user_id=uid)
     if not updated:
         raise HTTPException(status_code=404, detail="Позицію в портфелі не знайдено")
-    enriched = await undercut_engine.get_enriched_item(item_id)
-    return enriched or updated
+    enriched = await undercut_engine.get_enriched_item(item_id, user_id=uid)
+    state_envelope = await db.export_user_state(uid)
+    base = enriched or updated
+    return {**base, "state_envelope": state_envelope}
 
 
 @app.post("/api/portfolio/{item_id}/apply-undercut")
-async def apply_portfolio_undercut(item_id: int) -> dict[str, Any]:
+async def apply_portfolio_undercut(item_id: int, request: Request) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
     try:
-        return await undercut_engine.apply_undercut(item_id)
+        res = await undercut_engine.apply_undercut(item_id, user_id=uid)
+        state_envelope = await db.export_user_state(uid)
+        return {**res, "state_envelope": state_envelope}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -496,21 +858,29 @@ async def apply_portfolio_undercut(item_id: int) -> dict[str, Any]:
 @app.post("/api/portfolio/{item_id}/simulate-competitor")
 async def simulate_competitor(
     item_id: int,
+    request: Request,
     body: SimulateCompetitorRequest | None = Body(default=None),
 ) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
     drop = body.drop_ton if body else 0.1
     try:
-        return await undercut_engine.simulate_competitor_undercut(item_id, drop_ton=drop)
+        res = await undercut_engine.simulate_competitor_undercut(item_id, drop_ton=drop, user_id=uid)
+        state_envelope = await db.export_user_state(uid)
+        return {**res, "state_envelope": state_envelope}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.delete("/api/portfolio/{item_id}")
-async def delete_portfolio_item(item_id: int) -> dict[str, Any]:
-    deleted = await db.delete_portfolio_item(item_id)
+async def delete_portfolio_item(item_id: int, request: Request) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
+    deleted = await db.delete_portfolio_item(item_id, user_id=uid)
     if not deleted:
         raise HTTPException(status_code=404, detail="Позицію в портфелі не знайдено")
-    return {"deleted": True, "id": item_id}
+    state_envelope = await db.export_user_state(uid)
+    return {"deleted": True, "id": item_id, "state_envelope": state_envelope}
 
 
 # ==============================================================================
@@ -519,38 +889,37 @@ async def delete_portfolio_item(item_id: int) -> dict[str, Any]:
 
 
 @app.get("/api/settings")
-async def get_settings() -> dict[str, Any]:
+async def get_settings(request: Request) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
     data = runtime_config.as_public_dict(
         bot_connected=telegram_bot_service.is_connected,
         live_markets=multi_market.get_live_markets(),
     )
     data["bot_username"] = telegram_bot_service.bot_username
-    data["today_spent_ton"] = round(await db.get_today_spent_ton(), 2)
+    data["today_spent_ton"] = round(await db.get_today_spent_ton(user_id=uid), 2)
     return data
 
 
 @app.patch("/api/settings")
-async def patch_settings(body: SettingsUpdate) -> dict[str, Any]:
+async def patch_settings(request: Request, body: SettingsUpdate) -> dict[str, Any]:
     updates = body.model_dump(exclude_none=True)
-    # In production Vercel mode, secrets are locked exclusively to encrypted server Environment Variables
     if IS_VERCEL:
         for secret_k in SECRET_KEYS:
             updates.pop(secret_k, None)
     old_token = runtime_config.tg_bot_token
     await db.save_settings(updates)
 
-    # Restart Telegram bot if token changed (in Vercel mode just reset cached bot for webhook)
     if "tg_bot_token" in updates and runtime_config.tg_bot_token != old_token:
         if IS_VERCEL:
             await telegram_bot_service.stop()
         else:
             await telegram_bot_service.restart()
 
-    # Refresh caches if marketplace credentials changed
     if any(k in updates for k in ("getgems_api_key", "portals_init_data", "mrkt_init_data", "tonnel_init_data")):
         analytics_engine.clear_caches()
 
-    return await get_settings()
+    return await get_settings(request)
 
 
 @app.post("/api/settings/test-telegram")
@@ -559,9 +928,11 @@ async def test_telegram() -> dict[str, Any]:
 
 
 @app.post("/api/trade/execute")
-async def execute_trade(body: TradeExecuteRequest) -> dict[str, Any]:
+async def execute_trade(request: Request, body: TradeExecuteRequest) -> dict[str, Any]:
+    user = await get_request_user(request)
+    uid = user["tg_user_id"]
     price = round(float(body.price), 2)
-    today_spent = await db.get_today_spent_ton()
+    today_spent = await db.get_today_spent_ton(user_id=uid)
 
     if price > runtime_config.max_single_buy_ton:
         raise HTTPException(
@@ -577,7 +948,7 @@ async def execute_trade(body: TradeExecuteRequest) -> dict[str, Any]:
     is_dry = runtime_config.dry_run
     mode = "DRY_RUN" if is_dry else "LIVE"
 
-    await db.record_trade(body.listing_id, body.short_name, price, is_dry)
+    await db.record_trade(body.listing_id, body.short_name, price, is_dry, user_id=uid)
     target_list = body.auto_list_price or round(
         max((body.fair_value or price * 1.18) * 0.97, price * 1.15), 2
     )
@@ -596,9 +967,11 @@ async def execute_trade(body: TradeExecuteRequest) -> dict[str, Any]:
             "min_price_guard": round(price * 1.07, 2),
             "undercut_step": 0.05,
             "status": "listed",
-        }
+        },
+        user_id=uid,
     )
-    enriched = await undercut_engine.get_enriched_item(created["id"]) or created
+    enriched = await undercut_engine.get_enriched_item(created["id"], user_id=uid) or created
+    state_envelope = await db.export_user_state(uid)
 
     msg = (
         f"[DRY RUN] Симуляція купівлі {body.collection_name} #{body.number} за {price} TON успішна. Додано в портфель."
@@ -611,6 +984,7 @@ async def execute_trade(body: TradeExecuteRequest) -> dict[str, Any]:
         title=f"Купівля [{mode}]: {body.collection_name} #{body.number}",
         summary=msg,
         payload=enriched,
+        user_id=uid,
     )
     await ws_manager.broadcast("trade_executed", {"mode": mode, "item": enriched, "message": msg})
 
@@ -620,6 +994,7 @@ async def execute_trade(body: TradeExecuteRequest) -> dict[str, Any]:
         "mode": mode,
         "message": msg,
         "portfolio_item": enriched,
+        "state_envelope": state_envelope,
     }
 
 
