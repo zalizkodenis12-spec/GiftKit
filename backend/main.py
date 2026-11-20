@@ -533,32 +533,58 @@ async def get_overview(request: Request) -> dict[str, Any]:
 async def get_scanner_listings(
     collection: str | None = Query(default=None),
     market: str | None = Query(default=None),
+    search: str | None = Query(default=None),
     min_discount: float = Query(default=-100.0),
+    min_price: float | None = Query(default=None),
     max_price: float | None = Query(default=None),
     rare_combo_only: bool = Query(default=False),
     visual_top_only: bool = Query(default=False),
     nice_number_only: bool = Query(default=False),
     sort: str = Query(default="discount_desc"),
-    limit: int = Query(default=40, ge=1, le=100),
+    limit: int = Query(default=50, ge=1, le=100),
+    page: int = Query(default=0, ge=0, le=500),
 ) -> dict[str, Any]:
-    items, arb_top = await asyncio.gather(
-        analytics_engine.get_analyzed_listings(
+    if page == 0:
+        (items, has_more, next_min_price), arb_top = await asyncio.gather(
+            analytics_engine.get_analyzed_listings_page(
+                collection=collection,
+                market=market,
+                search=search,
+                min_discount=min_discount,
+                min_price=min_price,
+                max_price=max_price,
+                rare_combo_only=rare_combo_only,
+                visual_top_only=visual_top_only,
+                nice_number_only=nice_number_only,
+                sort=sort,
+                limit=limit,
+                page=page,
+            ),
+            analytics_engine.get_arbitrage_opportunities(limit=5),
+        )
+    else:
+        items, has_more, next_min_price = await analytics_engine.get_analyzed_listings_page(
             collection=collection,
             market=market,
+            search=search,
             min_discount=min_discount,
+            min_price=min_price,
             max_price=max_price,
             rare_combo_only=rare_combo_only,
             visual_top_only=visual_top_only,
             nice_number_only=nice_number_only,
             sort=sort,
             limit=limit,
-        ),
-        analytics_engine.get_arbitrage_opportunities(limit=5),
-    )
+            page=page,
+        )
+        arb_top = []
     return {
         "items": [i.model_dump() for i in items],
         "arbitrage_top": [a.model_dump() for a in arb_top],
         "total": len(items),
+        "page": page,
+        "has_more": has_more,
+        "next_min_price": next_min_price,
     }
 
 

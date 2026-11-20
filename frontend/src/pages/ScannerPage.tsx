@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   Check,
   ChevronDown,
+  Loader2,
   RefreshCw,
   Search,
   SlidersHorizontal,
@@ -46,83 +47,212 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
   const [items, setItems] = useState<AnalyzedListing[]>([]);
   const [arbitrage, setArbitrage] = useState<ArbitrageOpportunity[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const [nextMinPrice, setNextMinPrice] = useState<number | null>(null);
 
   // Filters
   const [searchText, setSearchText] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [collection, setCollection] = useState('');
   const [selectedMarkets, setSelectedMarkets] = useState<string[]>([]);
   const [showMarketMenu, setShowMarketMenu] = useState(false);
   const [sort, setSort] = useState<SortOption>('discount_desc');
 
-  const filteredItems = items.filter((item) => {
-    if (selectedMarkets.length > 0 && selectedMarkets.length < MARKET_OPTIONS.length) {
-      if (!selectedMarkets.includes(String(item.market).toLowerCase())) {
-        return false;
-      }
-    }
-    if (searchText.trim()) {
-      const q = searchText.trim().toLowerCase();
-      const matchesText =
-        item.collection_name.toLowerCase().includes(q) ||
-        item.short_name.toLowerCase().includes(q) ||
-        String(item.number).includes(q) ||
-        (item.harmony_label || '').toLowerCase().includes(q) ||
-        (item.symbol_badge || '').toLowerCase().includes(q) ||
-        (item.trend_label || '').toLowerCase().includes(q) ||
-        (item.number_pattern || '').toLowerCase().includes(q) ||
-        (item.attributes || []).some((a) => a.value.toLowerCase().includes(q));
-      if (!matchesText) return false;
-    }
-    return true;
-  });
+  const requestSeqRef = useRef(0);
+  const loadingMoreRef = useRef(false);
+  const itemsRef = useRef<AnalyzedListing[]>([]);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      setDebouncedSearch(searchText.trim());
+    }, 380);
+    return () => window.clearTimeout(t);
+  }, [searchText]);
+
+  const filteredItems = useMemo(
+    () =>
+      items.filter((item) => {
+        if (selectedMarkets.length > 0 && selectedMarkets.length < MARKET_OPTIONS.length) {
+          if (!selectedMarkets.includes(String(item.market).toLowerCase())) {
+            return false;
+          }
+        }
+        if (searchText.trim()) {
+          const q = searchText.trim().toLowerCase().replace(/^#/, '');
+          const matchesText =
+            item.collection_name.toLowerCase().includes(q) ||
+            item.short_name.toLowerCase().includes(q) ||
+            String(item.number).includes(q) ||
+            (item.harmony_label || '').toLowerCase().includes(q) ||
+            (item.symbol_badge || '').toLowerCase().includes(q) ||
+            (item.trend_label || '').toLowerCase().includes(q) ||
+            (item.number_pattern || '').toLowerCase().includes(q) ||
+            (item.attributes || []).some((a) => a.value.toLowerCase().includes(q));
+          if (!matchesText) return false;
+        }
+        return true;
+      }),
+    [items, selectedMarkets, searchText],
+  );
+
+  const selectedCollectionObj = useMemo(
+    () => collections.find((c) => c.short_name === collection),
+    [collections, collection],
+  );
 
   const marketParam =
     selectedMarkets.length > 0 && selectedMarkets.length < MARKET_OPTIONS.length
       ? selectedMarkets.join(',')
       : undefined;
 
-  const fetchListings = useCallback(async () => {
+  const fetchInitialListings = useCallback(async () => {
+    const seq = ++requestSeqRef.current;
+    loadingMoreRef.current = false;
     setLoading(true);
+    setLoadingMore(false);
+    setPage(0);
+    setHasMore(true);
+    setNextMinPrice(null);
+
     try {
       const [listRes, arbRes] = await Promise.all([
         api.getScannerListings({
           collection: collection || undefined,
           market: marketParam,
+          search: debouncedSearch || undefined,
           min_discount: -100,
           sort,
-          limit: 60,
+          limit: 50,
+          page: 0,
         }),
         api.getScannerArbitrage().catch(() => ({ opportunities: [] })),
       ]);
 
-      setItems(listRes.items || []);
+      if (seq !== requestSeqRef.current) return;
+
+      const initialItems = listRes.items || [];
+      setItems(initialItems);
+      itemsRef.current = initialItems;
+      setHasMore(listRes.has_more ?? initialItems.length >= 25);
+      setNextMinPrice(listRes.next_min_price ?? null);
+
       const arbList =
         arbRes.opportunities && arbRes.opportunities.length > 0
           ? arbRes.opportunities
           : listRes.arbitrage_top || [];
       setArbitrage(arbList);
     } catch (err) {
+      if (seq !== requestSeqRef.current) return;
       onNotify(
         'Не вдалося завантажити сканер',
         err instanceof Error ? err.message : 'Перевірте підключення до бекенду',
         'error',
       );
     } finally {
-      setLoading(false);
+      if (seq === requestSeqRef.current) {
+        setLoading(false);
+      }
     }
-  }, [collection, marketParam, sort, onNotify]);
+  }, [collection, marketParam, debouncedSearch, sort, onNotify]);
+
+  const loadNextPage = useCallback(async () => {
+    if (loading || loadingMoreRef.current || !hasMore) return;
+    const seq = requestSeqRef.current;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+
+    try {
+      let currentPage = page;
+      let cursorMinPrice = nextMinPrice;
+      let moreAvailable: boolean = hasMore;
+      let attempts = 0;
+
+      // Up to 2 automatic skips if a pagination boundary batch overlaps with already loaded items
+      while (attempts < 2 && moreAvailable) {
+        const nextPageNum = currentPage + 1;
+        const res = await api.getScannerListings({
+          collection: collection || undefined,
+          market: marketParam,
+          search: debouncedSearch || undefined,
+          min_discount: -100,
+          min_price: cursorMinPrice ?? undefined,
+          sort,
+          limit: 50,
+          page: nextPageNum,
+        });
+
+        if (seq !== requestSeqRef.current) return;
+
+        const incoming = res.items || [];
+        const existingIds = new Set(itemsRef.current.map((x) => x.id));
+        const fresh = incoming.filter((x) => x.id && !existingIds.has(x.id));
+
+        currentPage = nextPageNum;
+        if (typeof res.next_min_price === 'number' && res.next_min_price > 0) {
+          cursorMinPrice = res.next_min_price;
+        }
+        moreAvailable = Boolean(res.has_more);
+
+        if (fresh.length > 0) {
+          const merged = [...itemsRef.current, ...fresh];
+          itemsRef.current = merged;
+          setItems(merged);
+          break;
+        }
+        attempts += 1;
+      }
+
+      if (seq === requestSeqRef.current) {
+        setPage(currentPage);
+        setNextMinPrice(cursorMinPrice);
+        setHasMore(moreAvailable);
+      }
+    } catch {
+      // keep existing items & allow user to retry via scroll or button
+    } finally {
+      if (seq === requestSeqRef.current) {
+        loadingMoreRef.current = false;
+        setLoadingMore(false);
+      }
+    }
+  }, [loading, hasMore, page, nextMinPrice, collection, marketParam, debouncedSearch, sort]);
 
   useEffect(() => {
-    fetchListings();
-  }, [fetchListings, refreshTick]);
+    fetchInitialListings();
+  }, [fetchInitialListings, refreshTick]);
+
+  // Infinite scroll observer near bottom of the feed
+  useEffect(() => {
+    const node = sentinelRef.current;
+    if (!node || loading || !hasMore) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          loadNextPage();
+        }
+      },
+      { root: null, rootMargin: '420px 0px', threshold: 0.01 },
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [loading, hasMore, loadNextPage, items.length]);
 
   const handleHardRefresh = async () => {
     haptic('light');
     setRefreshing(true);
     try {
       await api.refreshScanner();
-      await fetchListings();
+      await fetchInitialListings();
       onNotify('Дані оновлено', 'Отримано свіжі лоти з усіх маркетів', 'success');
     } catch (err) {
       onNotify(
@@ -386,7 +516,9 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
         <div className="grid grid-cols-2 items-center pt-2.5 border-t border-[#E2E8F0] divide-x divide-[#CBD5E1]">
           <div className="pr-3 flex items-center justify-center">
             <span className="text-xs font-extrabold text-[#0B1120] tabular-nums">
-              {filteredItems.length} лотів
+              {selectedCollectionObj && selectedCollectionObj.listed_count > filteredItems.length && !debouncedSearch
+                ? `${filteredItems.length} / ${selectedCollectionObj.listed_count} лотів`
+                : `${filteredItems.length}${hasMore ? '+' : ''} лотів`}
             </span>
           </div>
 
@@ -441,16 +573,43 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
-          {filteredItems.map((item) => (
-            <NftCard
-              key={item.id}
-              item={item}
-              tonUsd={tonUsd}
-              onSelect={onSelectListing}
-            />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
+            {filteredItems.map((item) => (
+              <NftCard
+                key={item.id}
+                item={item}
+                tonUsd={tonUsd}
+                onSelect={onSelectListing}
+              />
+            ))}
+          </div>
+
+          {/* Infinite Scroll Sentinel & Load-More Footer */}
+          <div ref={sentinelRef} className="pt-2 pb-1 flex flex-col items-center justify-center gap-2">
+            {loadingMore ? (
+              <div className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white border border-[#E2E8F0] text-xs font-bold text-[#334155] shadow-sm">
+                <Loader2 className="w-4 h-4 text-[#0098EA] animate-spin" />
+                <span>Завантажуємо нову партію NFT...</span>
+              </div>
+            ) : hasMore ? (
+              <button
+                type="button"
+                onClick={() => {
+                  haptic('light');
+                  loadNextPage();
+                }}
+                className="px-5 py-2.5 rounded-xl bg-[#F4F7FB] hover:bg-[#E8F5FE] border border-[#E2E8F0] text-[#0B1120] text-xs font-bold cursor-pointer transition-colors"
+              >
+                Завантажити ще NFT
+              </button>
+            ) : (
+              <p className="text-[11px] font-semibold text-[#64748B]">
+                Завантажено всі доступні лоти ({filteredItems.length})
+              </p>
+            )}
+          </div>
+        </>
       )}
     </div>
   );

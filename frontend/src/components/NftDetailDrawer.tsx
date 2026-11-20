@@ -734,7 +734,7 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
               type="button"
               disabled={busyAction !== null}
               onClick={() => handleAction('offer', onMakeOffer)}
-              className="h-11 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] font-bold text-[12.5px] flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-60"
+              className="ton-btn-primary h-11 rounded-xl font-bold text-[12.5px] flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
             >
               <Zap className="w-4 h-4" />
               <span>{busyAction === 'offer' ? 'Надсилаємо...' : 'Поставити офер'}</span>
@@ -748,7 +748,7 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
                 haptic('light');
                 openExternalLink(`https://t.me/nft/${item.tg_id}`);
               }}
-              className="h-9 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] font-bold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
+              className="h-9 rounded-xl bg-white hover:bg-[#F8FAFC] border border-[#E2E8F0] text-[#334155] font-bold text-[11px] flex items-center justify-center gap-1 cursor-pointer"
             >
               <ExternalLink className="w-3.5 h-3.5 text-[#0098EA] shrink-0" />
               <span className="truncate">Профіль</span>

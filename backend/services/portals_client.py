@@ -469,6 +469,7 @@ class PortalsClient:
         self,
         *,
         limit: int = 50,
+        offset: int = 0,
         sort: str = "listed_at_desc",
         collection_ids: str | None = None,
         min_price: float | None = None,
@@ -479,6 +480,8 @@ class PortalsClient:
     ) -> list[dict[str, Any]]:
         """GET /nfts/search (cached 12s)."""
         params: dict[str, Any] = {"limit": limit, "sort": sort}
+        if offset > 0:
+            params["offset"] = offset
         if collection_ids:
             params["collection_ids"] = collection_ids
         if min_price is not None and min_price > 0:

@@ -712,73 +712,281 @@ class AnalyticsEngine:
             pass
         _ = tail_targets
 
-    async def get_analyzed_listings(
+    async def get_analyzed_listings_page(
         self,
         *,
         collection: str | None = None,
         market: str | None = None,
+        search: str | None = None,
         min_discount: float = -100.0,
+        min_price: float | None = None,
         max_price: float | None = None,
         rare_combo_only: bool = False,
         visual_top_only: bool = False,
         nice_number_only: bool = False,
         sort: str = "discount_desc",
-        limit: int = 40,
+        limit: int = 50,
+        page: int = 0,
         force_refresh: bool = False,
-    ) -> list[AnalyzedListing]:
-        """Fetch live listings from Portals, enrich with trait floors, visual CV & 24h trends."""
-        collections = await self.get_collections_summary(limit=100, force_refresh=force_refresh)
+    ) -> tuple[list[AnalyzedListing], bool, float | None]:
+        """Fetch paginated live listings from Portals with infinite-scroll cursor past 100 items."""
+        collections = await self.get_collections_summary(limit=250, force_refresh=force_refresh)
         col_by_id = {c.id: c for c in collections}
         col_by_short = {c.short_name: c for c in collections}
 
-        now = time.monotonic()
-        use_cache = not collection and not force_refresh and self._listings_cache and now < self._listings_cache[1]
+        clean_collection = (collection or "").strip().lower()
+        clean_search = (search or "").strip()
+        portals_search = clean_search.lstrip("#").strip() if clean_search else None
+        page_num = max(0, int(page or 0))
+        batch_limit = max(20, min(int(limit or 50), 50))
 
-        if use_cache:
+        now = time.monotonic()
+        use_global_cache = (
+            page_num == 0
+            and not clean_collection
+            and not portals_search
+            and not min_price
+            and sort != "price_asc"
+            and not force_refresh
+            and self._listings_cache
+            and now < self._listings_cache[1]
+        )
+
+        has_more = False
+        next_min_price: float | None = None
+
+        if use_global_cache:
             analyzed = list(self._listings_cache[0])  # type: ignore[index]
+            has_more = True
         else:
             async with self._listings_lock:
                 now = time.monotonic()
-                if not collection and not force_refresh and self._listings_cache and now < self._listings_cache[1]:
+                if (
+                    page_num == 0
+                    and not clean_collection
+                    and not portals_search
+                    and not min_price
+                    and sort != "price_asc"
+                    and not force_refresh
+                    and self._listings_cache
+                    and now < self._listings_cache[1]
+                ):
                     analyzed = list(self._listings_cache[0])
+                    has_more = True
                 else:
                     col_id_param: str | None = None
-                    if collection:
-                        col_obj = col_by_short.get(collection.strip().lower())
+                    if clean_collection:
+                        col_obj = col_by_short.get(clean_collection)
                         if col_obj:
                             col_id_param = col_obj.id
 
-                    # Fetch newest live listings sequentially through throttled client to avoid 429
-                    if col_id_param:
-                        newest = await portals_client.search_nfts(
-                            limit=40, sort="listed_at_desc", collection_ids=col_id_param, force_refresh=force_refresh
-                        )
-                        cheapest = await portals_client.search_nfts(
-                            limit=20, sort="price_asc", collection_ids=col_id_param, force_refresh=force_refresh
-                        )
-                    else:
-                        newest = await portals_client.search_nfts(
-                            limit=55, sort="listed_at_desc", force_refresh=force_refresh
-                        )
-                        cheapest = await portals_client.search_nfts(
-                            limit=25, sort="price_asc", min_price=3.0, force_refresh=force_refresh
-                        )
-
-                    seen_ids: set[str] = set()
                     merged_raw: list[dict[str, Any]] = []
-                    for item in newest + cheapest:
-                        iid = str(item.get("id") or "")
-                        if iid and iid not in seen_ids:
-                            seen_ids.add(iid)
-                            merged_raw.append(item)
+                    used_price_ladder = False
 
-                    # Graceful fallback anchored to real live collections if /nfts/search is temporarily 429'd
+                    if col_id_param or portals_search:
+                        if sort == "price_asc":
+                            used_price_ladder = True
+                            if page_num == 0:
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=0,
+                                    sort="price_asc",
+                                    collection_ids=col_id_param,
+                                    search=portals_search,
+                                    min_price=min_price,
+                                    max_price=max_price,
+                                    force_refresh=force_refresh,
+                                )
+                            elif page_num == 1:
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=50,
+                                    sort="price_asc",
+                                    collection_ids=col_id_param,
+                                    search=portals_search,
+                                    min_price=min_price,
+                                    max_price=max_price,
+                                    force_refresh=force_refresh,
+                                )
+                            else:
+                                cursor_price = round((min_price or 0.0) + 0.01, 2) if (min_price and min_price > 0) else None
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=0,
+                                    sort="price_asc",
+                                    collection_ids=col_id_param,
+                                    search=portals_search,
+                                    min_price=cursor_price,
+                                    max_price=max_price,
+                                    force_refresh=force_refresh,
+                                )
+                        else:
+                            base_sort = "price_desc" if sort == "price_desc" else "listed_at_desc"
+                            if page_num == 0:
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=0,
+                                    sort=base_sort,
+                                    collection_ids=col_id_param,
+                                    search=portals_search,
+                                    max_price=max_price,
+                                    force_refresh=force_refresh,
+                                )
+                            elif page_num == 1:
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=50,
+                                    sort=base_sort,
+                                    collection_ids=col_id_param,
+                                    search=portals_search,
+                                    max_price=max_price,
+                                    force_refresh=force_refresh,
+                                )
+                            elif page_num == 2:
+                                used_price_ladder = True
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=0,
+                                    sort="price_asc",
+                                    collection_ids=col_id_param,
+                                    search=portals_search,
+                                    max_price=max_price,
+                                    force_refresh=force_refresh,
+                                )
+                            elif page_num == 3:
+                                used_price_ladder = True
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=50,
+                                    sort="price_asc",
+                                    collection_ids=col_id_param,
+                                    search=portals_search,
+                                    max_price=max_price,
+                                    force_refresh=force_refresh,
+                                )
+                            else:
+                                used_price_ladder = True
+                                cursor_price = round((min_price or 0.0) + 0.01, 2) if (min_price and min_price > 0) else None
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=0,
+                                    sort="price_asc",
+                                    collection_ids=col_id_param,
+                                    search=portals_search,
+                                    min_price=cursor_price,
+                                    max_price=max_price,
+                                    force_refresh=force_refresh,
+                                )
+
+                        # If text search returned empty on page 0, try Portals model filter fallback
+                        if not merged_raw and portals_search and page_num == 0:
+                            merged_raw = await portals_client.search_nfts(
+                                limit=batch_limit,
+                                offset=0,
+                                sort="price_asc" if sort == "price_asc" else "listed_at_desc",
+                                collection_ids=col_id_param,
+                                filter_by_models=portals_search,
+                                max_price=max_price,
+                                force_refresh=force_refresh,
+                            )
+
+                        has_more = len(merged_raw) >= max(15, batch_limit - 5)
+                    else:
+                        # Global feed ("Всі колекції")
+                        if sort == "price_asc":
+                            used_price_ladder = True
+                            if page_num == 0:
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=0,
+                                    sort="price_asc",
+                                    min_price=min_price,
+                                    max_price=max_price,
+                                    force_refresh=force_refresh,
+                                )
+                            elif page_num == 1:
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=50,
+                                    sort="price_asc",
+                                    min_price=min_price,
+                                    max_price=max_price,
+                                    force_refresh=force_refresh,
+                                )
+                            else:
+                                cursor_price = round((min_price or 0.0) + 0.01, 2) if (min_price and min_price > 0) else None
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=0,
+                                    sort="price_asc",
+                                    min_price=cursor_price,
+                                    max_price=max_price,
+                                    force_refresh=force_refresh,
+                                )
+                            has_more = len(merged_raw) >= max(15, batch_limit - 5)
+                        elif page_num == 0:
+                            newest = await portals_client.search_nfts(
+                                limit=50,
+                                offset=0,
+                                sort="listed_at_desc",
+                                force_refresh=force_refresh,
+                            )
+                            cheapest = await portals_client.search_nfts(
+                                limit=25,
+                                offset=0,
+                                sort="price_asc",
+                                min_price=3.0,
+                                force_refresh=force_refresh,
+                            )
+                            seen_ids: set[str] = set()
+                            for item in newest + cheapest:
+                                iid = str(item.get("id") or "")
+                                if iid and iid not in seen_ids:
+                                    seen_ids.add(iid)
+                                    merged_raw.append(item)
+                            has_more = True
+                        else:
+                            # Page 1+: Walk across ALL 124+ collections by 24h volume (2 pages per collection)
+                            sorted_cols = sorted(collections, key=lambda c: c.day_volume, reverse=True)
+                            col_idx = page_num - 1
+                            total_cols = max(len(sorted_cols), 1)
+                            round_num = col_idx // total_cols
+                            if round_num < 2 and sorted_cols:
+                                target_col = sorted_cols[col_idx % total_cols]
+                                merged_raw = await portals_client.search_nfts(
+                                    limit=batch_limit,
+                                    offset=50 if round_num == 1 else 0,
+                                    sort="listed_at_desc",
+                                    collection_ids=target_col.id,
+                                    force_refresh=force_refresh,
+                                )
+                                has_more = (col_idx + 1) < (len(sorted_cols) * 2)
+                            else:
+                                has_more = False
+
+                    if used_price_ladder and merged_raw:
+                        prices = [to_float(r.get("price"), 0.0) for r in merged_raw if to_float(r.get("price"), 0.0) > 0]
+                        if prices:
+                            next_min_price = round(max(prices), 2)
+
+                    # Deduplicate merged_raw
+                    seen_raw: set[str] = set()
+                    dedup_raw: list[dict[str, Any]] = []
+                    for item in merged_raw:
+                        iid = str(item.get("id") or "")
+                        if iid and iid not in seen_raw:
+                            seen_raw.add(iid)
+                            dedup_raw.append(item)
+                    merged_raw = dedup_raw
+
+                    # Graceful fallback ONLY on page 0 if Portals /nfts/search is completely unreachable
                     used_fallback = False
-                    if not merged_raw:
+                    if not merged_raw and page_num == 0 and not portals_search:
                         used_fallback = True
+                        has_more = False
                         target_cols = (
-                            [col_by_short[collection.strip().lower()]]
-                            if collection and collection.strip().lower() in col_by_short
+                            [col_by_short[clean_collection]]
+                            if clean_collection and clean_collection in col_by_short
                             else sorted(collections, key=lambda c: c.day_volume, reverse=True)[:12]
                         )
                         for idx, c in enumerate(target_cols):
@@ -827,14 +1035,20 @@ class AnalyticsEngine:
                     # Run bounded concurrent pixel harmony & monochrome analysis (fast LRU cached)
                     await self._enrich_listings_with_visuals(analyzed)
 
-                    if not collection and analyzed:
+                    if (
+                        page_num == 0
+                        and not clean_collection
+                        and not portals_search
+                        and not min_price
+                        and sort != "price_asc"
+                        and analyzed
+                    ):
                         self._listings_cache = (analyzed, time.monotonic() + (25.0 if not used_fallback else 6.0))
 
         # Apply query filters
         items = analyzed
-        if collection:
-            short_f = collection.strip().lower()
-            items = [i for i in items if i.short_name == short_f]
+        if clean_collection:
+            items = [i for i in items if i.short_name == clean_collection]
         if market and market != "all":
             wanted = {m.strip().lower() for m in market.split(",") if m.strip() and m.strip().lower() != "all"}
             if wanted:
@@ -852,7 +1066,7 @@ class AnalyticsEngine:
         if nice_number_only:
             items = [i for i in items if i.number_bonus_percent > 0 or bool(i.number_badge) or bool(i.number_pattern)]
 
-        # Sorting
+        # Sorting within batch
         if sort == "price_asc":
             items.sort(key=lambda x: x.price)
         elif sort == "price_desc":
@@ -866,6 +1080,41 @@ class AnalyticsEngine:
         else:
             items.sort(key=lambda x: (x.discount_percent, x.net_profit_percent), reverse=True)
 
+        return items[: max(limit, 50)], has_more, next_min_price
+
+    async def get_analyzed_listings(
+        self,
+        *,
+        collection: str | None = None,
+        market: str | None = None,
+        search: str | None = None,
+        min_discount: float = -100.0,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        rare_combo_only: bool = False,
+        visual_top_only: bool = False,
+        nice_number_only: bool = False,
+        sort: str = "discount_desc",
+        limit: int = 40,
+        page: int = 0,
+        force_refresh: bool = False,
+    ) -> list[AnalyzedListing]:
+        """Fetch live listings from Portals, enrich with trait floors, visual CV & 24h trends."""
+        items, _, _ = await self.get_analyzed_listings_page(
+            collection=collection,
+            market=market,
+            search=search,
+            min_discount=min_discount,
+            min_price=min_price,
+            max_price=max_price,
+            rare_combo_only=rare_combo_only,
+            visual_top_only=visual_top_only,
+            nice_number_only=nice_number_only,
+            sort=sort,
+            limit=limit,
+            page=page,
+            force_refresh=force_refresh,
+        )
         return items[:limit]
 
     async def get_arbitrage_opportunities(self, limit: int = 20) -> list[ArbitrageOpportunity]:

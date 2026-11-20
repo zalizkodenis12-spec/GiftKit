@@ -331,7 +331,9 @@ export const api = {
   getScannerListings: (params?: {
     collection?: string;
     market?: string;
+    search?: string;
     min_discount?: number;
+    min_price?: number;
     max_price?: number;
     rare_combo_only?: boolean;
     visual_top_only?: boolean;
@@ -344,6 +346,7 @@ export const api = {
       | 'profit_desc'
       | 'visual_desc';
     limit?: number;
+    page?: number;
   }) => request<ScannerListingsResponse>(`/scanner/listings${toQuery(params || {})}`),
 
   getScannerArbitrage: () => request<ScannerArbitrageResponse>('/scanner/arbitrage'),

@@ -195,6 +195,9 @@ export interface ScannerListingsResponse {
   items: AnalyzedListing[];
   arbitrage_top: ArbitrageOpportunity[];
   total: number;
+  page?: number;
+  has_more?: boolean;
+  next_min_price?: number | null;
 }
 
 export interface ScannerArbitrageResponse {
