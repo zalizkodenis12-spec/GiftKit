@@ -56,14 +56,14 @@ class MultiMarketAggregator:
         markets: list[str] = ["portals"]
         if getgems_client.getgems_live_ok or runtime_config.getgems_api_key:
             markets.append("getgems")
-        if mrkt_client.last_live_ok or runtime_config.mrkt_init_data:
+        if mrkt_client.last_live_ok or mrkt_client.has_pushed_snapshot() or runtime_config.mrkt_init_data:
             markets.append("mrkt")
         if tonnel_client.last_live_ok or runtime_config.tonnel_init_data:
             markets.append("tonnel")
         return markets
 
     async def _try_mrkt_live_floor(self, short_name: str) -> float | None:
-        if not runtime_config.mrkt_init_data:
+        if not runtime_config.mrkt_init_data and not mrkt_client.has_pushed_snapshot():
             return None
         return await mrkt_client.get_floor_price(short_name)
 

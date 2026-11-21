@@ -16,7 +16,12 @@ import {
   Wallet,
   X,
 } from 'lucide-react';
-import { api, saveStoredUserProfile } from '../api/client';
+import {
+  api,
+  loadPersistedUserPrefs,
+  savePersistedUserPrefs,
+  saveStoredUserProfile,
+} from '../api/client';
 import type { AppSettings, OverviewResponse, UserProfile } from '../types/api';
 import { formatTon, getMarketMeta, haptic } from '../utils/format';
 
@@ -217,8 +222,20 @@ export const MarketsPage: React.FC<MarketsPageProps> = ({
   const loadSettings = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.getSettings();
-      setSettings({ ...DEFAULT_SETTINGS, ...data });
+      const [data, savedPrefs] = await Promise.all([
+        api.getSettings().catch(() => ({}) as Partial<AppSettings>),
+        loadPersistedUserPrefs().catch(() => null),
+      ]);
+      const merged: AppSettings = {
+        ...DEFAULT_SETTINGS,
+        ...data,
+        ...(savedPrefs || {}),
+      };
+      setSettings(merged);
+      // Silently re-hydrate backend if Vercel cold-started with defaults
+      if (savedPrefs && Object.keys(savedPrefs).length > 0) {
+        api.updateSettings(savedPrefs).catch(() => {});
+      }
     } catch {
       // keep defaults if offline
     } finally {
@@ -234,8 +251,11 @@ export const MarketsPage: React.FC<MarketsPageProps> = ({
     haptic('medium');
     setSaving(true);
     try {
+      savePersistedUserPrefs(settings);
       const updated = await api.updateSettings(settings);
-      setSettings({ ...DEFAULT_SETTINGS, ...updated });
+      const next = { ...DEFAULT_SETTINGS, ...updated };
+      setSettings(next);
+      savePersistedUserPrefs(next);
       await onSettingsSaved();
       onNotify(
         'Налаштування збережено',

@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 from loguru import logger
 
-from backend.config import runtime_config
+from backend.config import IS_VERCEL, runtime_config
 from backend.database import utc_now_iso
 from backend.services.portals_client import to_float, to_int
 
 MRKT_API_BASE = "https://api.tgmrkt.io/api/v1"
 MRKT_CDN_BASE = "https://cdn.tgmrkt.io"
+MRKT_SNAPSHOT_FILE = Path("/tmp/giftkit_mrkt_snapshot.json") if IS_VERCEL else (Path(__file__).resolve().parent.parent.parent / "data" / "mrkt_snapshot.json")
 
 
 class MrktClient:
@@ -34,9 +37,70 @@ class MrktClient:
 
         self._cache: dict[str, tuple[Any, float]] = {}
         self._cursor_store: dict[str, dict[int, str]] = {}  # query_key -> {page: cursor}
+        self._pushed_collections: dict[str, dict[str, Any]] = {}
+        self._pushed_listings: list[dict[str, Any]] = []
+        self._pushed_at: float = 0.0
 
         self.last_live_ok: bool = False
         self.last_error: str = ""
+
+    def ingest_pushed_snapshot(
+        self,
+        collections: dict[str, dict[str, Any]] | None = None,
+        listings: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Accept live MRKT collections & listings pushed from local MTProto relay to Vercel."""
+        now = time.time()
+        if isinstance(collections, dict) and collections:
+            self._pushed_collections = collections
+            self._cache_set("mrkt:collections", collections, ttl=600.0)
+        if isinstance(listings, list) and listings:
+            self._pushed_listings = listings
+        if self._pushed_collections or self._pushed_listings:
+            self._pushed_at = now
+            self.last_live_ok = True
+            self.last_error = ""
+            try:
+                MRKT_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+                MRKT_SNAPSHOT_FILE.write_text(
+                    json.dumps(
+                        {
+                            "ts": now,
+                            "collections": self._pushed_collections,
+                            "listings": self._pushed_listings,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+
+    def _load_snapshot_from_disk(self) -> None:
+        if self._pushed_listings and (time.time() - self._pushed_at) < 900.0:
+            return
+        try:
+            if not MRKT_SNAPSHOT_FILE.exists():
+                return
+            data = json.loads(MRKT_SNAPSHOT_FILE.read_text(encoding="utf-8"))
+            ts = float(data.get("ts") or 0.0)
+            if (time.time() - ts) > 3600.0:
+                return
+            cols = data.get("collections")
+            lst = data.get("listings")
+            if isinstance(cols, dict) and cols:
+                self._pushed_collections = cols
+            if isinstance(lst, list) and lst:
+                self._pushed_listings = lst
+            if self._pushed_collections or self._pushed_listings:
+                self._pushed_at = ts
+                self.last_live_ok = True
+        except Exception:
+            pass
+
+    def has_pushed_snapshot(self) -> bool:
+        self._load_snapshot_from_disk()
+        return bool(self._pushed_listings) and (time.time() - self._pushed_at) < 3600.0
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -217,6 +281,12 @@ class MrktClient:
             if cached is not None:
                 return cached
 
+        if IS_VERCEL:
+            self._load_snapshot_from_disk()
+            if self._pushed_collections:
+                self._cache_set(cache_key, self._pushed_collections, ttl=120.0)
+                return self._pushed_collections
+
         data = await self._authed_request("GET", "/gifts/collections")
         if isinstance(data, list) and data:
             result: dict[str, dict[str, Any]] = {}
@@ -263,6 +333,44 @@ class MrktClient:
             return float(entry["floor_price"])
         return None
 
+    def _search_pushed_snapshot(
+        self,
+        *,
+        collection_name: str | None,
+        sort: str,
+        count: int,
+        page: int,
+        search: str | None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        self._load_snapshot_from_disk()
+        if not self._pushed_listings:
+            return [], False
+        items = list(self._pushed_listings)
+        clean_col = (collection_name or "").strip().lower().replace(" ", "")
+        if clean_col:
+            items = [
+                g for g in items
+                if re.sub(r"[^a-z0-9]", "", str(g.get("name") or "").lower()) == re.sub(r"[^a-z0-9]", "", clean_col)
+            ]
+        clean_search = (search or "").strip().lstrip("#").lower()
+        if clean_search:
+            items = [
+                g for g in items
+                if clean_search in str(g.get("name") or "").lower()
+                or clean_search in str(g.get("external_collection_number") or "")
+                or any(clean_search in str(a.get("value") or "").lower() for a in (g.get("attributes") or []))
+            ]
+        if sort == "price_desc":
+            items.sort(key=lambda g: to_float(g.get("price"), 0.0), reverse=True)
+        elif sort == "newest":
+            items.sort(key=lambda g: str(g.get("listed_at") or ""), reverse=True)
+        else:
+            items.sort(key=lambda g: to_float(g.get("price"), 0.0))
+
+        start = max(0, page) * count
+        chunk = items[start : start + count]
+        return chunk, (start + count) < len(items)
+
     async def search_nfts(
         self,
         *,
@@ -274,13 +382,23 @@ class MrktClient:
         force_refresh: bool = False,
     ) -> tuple[list[dict[str, Any]], bool]:
         """POST /gifts/saling -> normalized live MRKT gift listings + has_more."""
+        safe_count = max(10, min(int(count or 30), 50))
+        page_num = max(0, int(page or 0))
+
+        if IS_VERCEL and self.has_pushed_snapshot():
+            return self._search_pushed_snapshot(
+                collection_name=collection_name,
+                sort=sort,
+                count=safe_count,
+                page=page_num,
+                search=search,
+            )
+
         if not (runtime_config.mrkt_init_data or "").strip():
             return [], False
 
         clean_col = (collection_name or "").strip()
         clean_search = (search or "").strip().lstrip("#")
-        safe_count = max(10, min(int(count or 30), 50))
-        page_num = max(0, int(page or 0))
 
         # Ordering supported by MRKT /gifts/saling
         if sort == "price_desc":

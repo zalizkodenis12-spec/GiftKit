@@ -81,7 +81,7 @@ async def _snapshot_loop() -> None:
 
 
 async def _push_market_credentials_to_vercel() -> None:
-    """Securely sync live MRKT/Tonnel initData from local backend to Vercel production."""
+    """Securely sync live MRKT/Tonnel initData & live MRKT snapshot from local PC to Vercel."""
     if IS_VERCEL:
         return
     webapp_url = (runtime_config.webapp_url or "").strip().rstrip("/")
@@ -97,26 +97,56 @@ async def _push_market_credentials_to_vercel() -> None:
         sig = auth_service.get_bot_sync_signature()
         if not sig:
             return
-        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=4.0)) as client:
+
+        # Relay live MRKT collections (135 floors) + up to 120 live listings directly from local PC
+        mrkt_snapshot: dict[str, Any] | None = None
+        if mrkt_d:
+            try:
+                m_cols = await mrkt_client.get_collections()
+                m_p0, _ = await mrkt_client.search_nfts(count=50, sort="price_asc", page=0)
+                m_p1, _ = await mrkt_client.search_nfts(count=50, sort="price_asc", page=1)
+                m_new, _ = await mrkt_client.search_nfts(count=40, sort="newest", page=0)
+                seen_m: set[str] = set()
+                combined_m: list[dict[str, Any]] = []
+                for it in (m_p0 or []) + (m_p1 or []) + (m_new or []):
+                    mid = str(it.get("id") or "")
+                    if mid and mid not in seen_m:
+                        seen_m.add(mid)
+                        combined_m.append(it)
+                if m_cols or combined_m:
+                    mrkt_snapshot = {
+                        "collections": m_cols,
+                        "listings": combined_m,
+                    }
+            except Exception as exc:
+                logger.debug(f"MRKT snapshot build skipped: {exc}")
+
+        payload: dict[str, Any] = {
+            "user_id": runtime_config.tg_admin_chat_id or DEFAULT_ADMIN_USER_ID,
+            "market_credentials": {
+                "mrkt_init_data": mrkt_d,
+                "tonnel_init_data": tonnel_d,
+            },
+        }
+        if mrkt_snapshot:
+            payload["mrkt_snapshot"] = mrkt_snapshot
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=4.0)) as client:
             resp = await client.post(
                 f"{webapp_url}/api/internal/bot-sync",
                 headers={"X-Bot-Sync-Signature": sig},
-                json={
-                    "user_id": runtime_config.tg_admin_chat_id or DEFAULT_ADMIN_USER_ID,
-                    "market_credentials": {
-                        "mrkt_init_data": mrkt_d,
-                        "tonnel_init_data": tonnel_d,
-                    },
-                },
+                json=payload,
             )
             if resp.status_code == 200:
-                logger.debug("Synced live MRKT/Tonnel credentials to Vercel production.")
+                logger.debug(
+                    f"Synced live MRKT ({len((mrkt_snapshot or {}).get('listings') or [])} lots) & Tonnel credentials to Vercel."
+                )
     except Exception as exc:
         logger.debug(f"Vercel market credentials sync skipped: {exc}")
 
 
 async def _mtproto_sync_loop() -> None:
-    """Background loop: refreshes MRKT & Tonnel initData via Telethon every 30 min and syncs to Vercel."""
+    """Background loop: refreshes MRKT & Tonnel initData via Telethon every 30 min and syncs to Vercel every 45s."""
     await asyncio.sleep(3)
     last_mtproto_refresh = 0.0
     while True:
@@ -130,7 +160,7 @@ async def _mtproto_sync_loop() -> None:
             break
         except Exception as exc:
             logger.debug(f"MTProto sync loop skipped: {exc}")
-        await asyncio.sleep(75)
+        await asyncio.sleep(45)
 
 
 async def _warmup_cache() -> None:
@@ -532,6 +562,14 @@ async def post_internal_bot_sync(
             await db.save_settings(cred_updates)
             analytics_engine.clear_caches()
             logger.info(f"Updated live market credentials via bot-sync: {list(cred_updates.keys())}")
+
+    m_snap = body.get("mrkt_snapshot")
+    if isinstance(m_snap, dict):
+        mrkt_client.ingest_pushed_snapshot(
+            collections=m_snap.get("collections") if isinstance(m_snap.get("collections"), dict) else None,
+            listings=m_snap.get("listings") if isinstance(m_snap.get("listings"), list) else None,
+        )
+        analytics_engine._listings_cache = None
 
     alerts = body.get("alerts")
     if isinstance(alerts, list):

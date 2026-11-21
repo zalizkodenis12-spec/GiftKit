@@ -759,7 +759,8 @@ class AnalyticsEngine:
             if m.strip() and m.strip().lower() != "all"
         }
         only_external = bool(wanted_markets) and wanted_markets.issubset({"mrkt", "tonnel"})
-        want_mrkt = bool(runtime_config.mrkt_init_data) and ((not wanted_markets) or ("mrkt" in wanted_markets))
+        mrkt_ready = bool(runtime_config.mrkt_init_data) or mrkt_client.has_pushed_snapshot()
+        want_mrkt = mrkt_ready and ((not wanted_markets) or ("mrkt" in wanted_markets))
         want_tonnel = bool(runtime_config.tonnel_init_data) and ((not wanted_markets) or ("tonnel" in wanted_markets))
 
         now = time.monotonic()

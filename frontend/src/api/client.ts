@@ -30,7 +30,13 @@ const API_BASE = '/api';
 const SESSION_TOKEN_KEY = 'giftkit_session_token';
 const STATE_ENVELOPE_KEY = 'giftkit_state_envelope';
 const USER_PROFILE_KEY = 'giftkit_user_profile';
+const USER_SETTINGS_KEY = 'giftkit_user_settings_v1';
 const CLOUD_STATE_KEY = 'gk_state_v1';
+const CLOUD_CHUNK_META = 'gk_st2_n';
+const CLOUD_CHUNK_PREFIX = 'gk_st2_';
+const CLOUD_SETTINGS_KEY = 'gk_prefs_v1';
+const CLOUD_CHUNK_SIZE = 3600;
+const MAX_CLOUD_CHUNKS = 60;
 
 export function getStoredUserProfile(): UserProfile | null {
   if (typeof window === 'undefined') return null;
@@ -107,6 +113,55 @@ export function getStoredStateEnvelope(): unknown | null {
   }
 }
 
+function cloudGetItem(key: string, timeoutMs = 1100): Promise<string | null> {
+  if (typeof window === 'undefined') return Promise.resolve(null);
+  const cloud = window.Telegram?.WebApp?.CloudStorage;
+  if (!cloud || typeof cloud.getItem !== 'function') return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(null);
+      }
+    }, timeoutMs);
+    try {
+      cloud.getItem(key, (err, val) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(!err && typeof val === 'string' && val.length > 0 ? val : null);
+      });
+    } catch {
+      if (!settled) {
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(null);
+      }
+    }
+  });
+}
+
+function envelopeRank(env: unknown): number {
+  if (!env || typeof env !== 'object') return -1;
+  const obj = env as {
+    state_version?: number;
+    updated_at?: number;
+    portfolio?: unknown[];
+    rules?: unknown[];
+    offers?: unknown[];
+  };
+  const ver = Number(obj.state_version || 0);
+  if (ver > 0) return ver;
+  const ts = Number(obj.updated_at || 0);
+  if (ts > 0) return ts;
+  return (
+    (Array.isArray(obj.portfolio) ? obj.portfolio.length : 0) +
+    (Array.isArray(obj.rules) ? obj.rules.length : 0) +
+    (Array.isArray(obj.offers) ? obj.offers.length : 0)
+  );
+}
+
 export function saveStateEnvelope(envelope: unknown): void {
   if (!envelope || typeof window === 'undefined') return;
   try {
@@ -115,8 +170,18 @@ export function saveStateEnvelope(envelope: unknown): void {
     localStorage.setItem(STATE_ENVELOPE_KEY, serialized);
     const cloud = window.Telegram?.WebApp?.CloudStorage;
     if (cloud && typeof cloud.setItem === 'function') {
-      // CloudStorage has 4096 bytes limit per key; guard with try/catch
-      if (serialized.length <= 4000) {
+      const totalChunks = Math.min(
+        MAX_CLOUD_CHUNKS,
+        Math.ceil(serialized.length / CLOUD_CHUNK_SIZE),
+      );
+      if (totalChunks * CLOUD_CHUNK_SIZE >= serialized.length) {
+        for (let i = 0; i < totalChunks; i += 1) {
+          const chunk = serialized.slice(i * CLOUD_CHUNK_SIZE, (i + 1) * CLOUD_CHUNK_SIZE);
+          cloud.setItem(`${CLOUD_CHUNK_PREFIX}${i}`, chunk, () => {});
+        }
+        cloud.setItem(CLOUD_CHUNK_META, String(totalChunks), () => {});
+      }
+      if (serialized.length <= 3900) {
         cloud.setItem(CLOUD_STATE_KEY, serialized, () => {});
       }
     }
@@ -129,56 +194,96 @@ export async function resolveInitialStateEnvelope(): Promise<unknown | null> {
   const localEnv = getStoredStateEnvelope();
   if (typeof window === 'undefined') return localEnv;
   try {
-    const cloud = window.Telegram?.WebApp?.CloudStorage;
-    if (!cloud || typeof cloud.getItem !== 'function') {
-      return localEnv;
-    }
-    return await new Promise<unknown | null>((resolve) => {
-      let settled = false;
-      const timer = window.setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          resolve(localEnv);
-        }
-      }, 900);
-
-      try {
-        cloud.getItem(CLOUD_STATE_KEY, (err, val) => {
-          if (settled) return;
-          settled = true;
-          window.clearTimeout(timer);
-          if (!err && val) {
-            try {
-              const parsed = JSON.parse(val);
-              if (!localEnv) {
-                localStorage.setItem(STATE_ENVELOPE_KEY, val);
-                resolve(parsed);
-                return;
-              }
-              const localTs = Number((localEnv as { updated_at?: number })?.updated_at || 0);
-              const cloudTs = Number((parsed as { updated_at?: number })?.updated_at || 0);
-              if (cloudTs > localTs) {
-                localStorage.setItem(STATE_ENVELOPE_KEY, val);
-                resolve(parsed);
-                return;
-              }
-            } catch {
-              // ignore malformed cloud state
-            }
-          }
-          resolve(localEnv);
-        });
-      } catch {
-        if (!settled) {
-          settled = true;
-          window.clearTimeout(timer);
-          resolve(localEnv);
-        }
+    let cloudRaw: string | null = null;
+    const countRaw = await cloudGetItem(CLOUD_CHUNK_META, 900);
+    const chunkCount = countRaw ? Number.parseInt(countRaw, 10) : 0;
+    if (Number.isFinite(chunkCount) && chunkCount > 0 && chunkCount <= MAX_CLOUD_CHUNKS) {
+      const parts = await Promise.all(
+        Array.from({ length: chunkCount }, (_, i) =>
+          cloudGetItem(`${CLOUD_CHUNK_PREFIX}${i}`, 1100),
+        ),
+      );
+      if (parts.every((p) => typeof p === 'string')) {
+        cloudRaw = parts.join('');
       }
-    });
+    }
+    if (!cloudRaw) {
+      cloudRaw = await cloudGetItem(CLOUD_STATE_KEY, 900);
+    }
+    if (cloudRaw) {
+      try {
+        const parsed = JSON.parse(cloudRaw);
+        if (!localEnv || envelopeRank(parsed) > envelopeRank(localEnv)) {
+          localStorage.setItem(STATE_ENVELOPE_KEY, cloudRaw);
+          return parsed;
+        }
+      } catch {
+        // ignore malformed cloud state
+      }
+    }
   } catch {
-    return localEnv;
+    // ignore CloudStorage errors
   }
+  return localEnv;
+}
+
+export type PersistedUserPrefs = Partial<
+  Pick<
+    AppSettings,
+    | 'dry_run'
+    | 'daily_limit_ton'
+    | 'max_single_buy_ton'
+    | 'stop_loss_percent'
+    | 'wallet_address'
+    | 'wallet_balance_ton'
+  >
+>;
+
+export function savePersistedUserPrefs(prefs: PersistedUserPrefs): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const clean: PersistedUserPrefs = {
+      dry_run: prefs.dry_run,
+      daily_limit_ton: prefs.daily_limit_ton,
+      max_single_buy_ton: prefs.max_single_buy_ton,
+      stop_loss_percent: prefs.stop_loss_percent,
+      wallet_address: prefs.wallet_address,
+      wallet_balance_ton: prefs.wallet_balance_ton,
+    };
+    const serialized = JSON.stringify(clean);
+    localStorage.setItem(USER_SETTINGS_KEY, serialized);
+    const cloud = window.Telegram?.WebApp?.CloudStorage;
+    if (cloud && typeof cloud.setItem === 'function' && serialized.length <= 3900) {
+      cloud.setItem(CLOUD_SETTINGS_KEY, serialized, () => {});
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export async function loadPersistedUserPrefs(): Promise<PersistedUserPrefs | null> {
+  if (typeof window === 'undefined') return null;
+  let localPrefs: PersistedUserPrefs | null = null;
+  try {
+    const raw = localStorage.getItem(USER_SETTINGS_KEY);
+    if (raw) localPrefs = JSON.parse(raw) as PersistedUserPrefs;
+  } catch {
+    localPrefs = null;
+  }
+  try {
+    const cloudRaw = await cloudGetItem(CLOUD_SETTINGS_KEY, 900);
+    if (cloudRaw) {
+      const parsed = JSON.parse(cloudRaw) as PersistedUserPrefs;
+      if (!localPrefs) {
+        localStorage.setItem(USER_SETTINGS_KEY, cloudRaw);
+        return parsed;
+      }
+      return { ...parsed, ...localPrefs };
+    }
+  } catch {
+    // ignore cloud errors
+  }
+  return localPrefs;
 }
 
 function toAsciiJsonHeader(value: unknown): string {
@@ -223,7 +328,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const env = getStoredStateEnvelope();
     if (env) {
       try {
-        headers['X-GiftKit-State'] = toAsciiJsonHeader(env);
+        const encoded = toAsciiJsonHeader(env);
+        if (encoded.length <= 10500) {
+          headers['X-GiftKit-State'] = encoded;
+        }
       } catch {
         // ignore serialization error
       }
