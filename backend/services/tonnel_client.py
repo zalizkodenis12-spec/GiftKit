@@ -124,7 +124,11 @@ class TonnelClient:
                 return floors
 
         stale = self._cache_get(cache_key, allow_stale=True)
-        return stale if isinstance(stale, dict) else {}
+        if isinstance(stale, dict) and stale:
+            self._cache_set(cache_key, stale, ttl=30.0)
+            return stale
+        self._cache_set(cache_key, {}, ttl=25.0)
+        return {}
 
     async def get_floor_price(self, short_name: str) -> float | None:
         floors = await self.get_collections_floors()

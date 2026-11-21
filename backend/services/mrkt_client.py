@@ -24,11 +24,12 @@ class MrktClient:
         self._client: httpx.AsyncClient | None = None
         self._lock = asyncio.Lock()
         self._last_req_ts: float = 0.0
-        self._min_interval: float = 0.85  # Stay well below MRKT RPS limit (429 protection)
+        self._min_interval: float = 0.35  # Protect against MRKT 429 while staying snappy
 
         self._token: str = ""
         self._token_for_init: str = ""
         self._token_expires_at: float = 0.0
+        self._auth_fail_until: float = 0.0
 
         self._cache: dict[str, tuple[Any, float]] = {}
         self._cursor_store: dict[str, dict[int, str]] = {}  # query_key -> {page: cursor}
@@ -88,6 +89,8 @@ class MrktClient:
             return None
 
         now = time.monotonic()
+        if not force and now < self._auth_fail_until and self._token_for_init == init_data:
+            return None
         if (
             not force
             and self._token
@@ -137,9 +140,13 @@ class MrktClient:
                         self.last_error = ""
                         return self._token
                 self.last_error = f"MRKT auth HTTP {resp.status_code}"
+                self._token_for_init = init_data
+                self._auth_fail_until = time.monotonic() + 20.0
                 logger.warning(f"MRKT /auth failed: HTTP {resp.status_code}")
             except Exception as exc:
                 self.last_error = f"MRKT auth error: {exc}"
+                self._token_for_init = init_data
+                self._auth_fail_until = time.monotonic() + 20.0
                 logger.debug(f"MRKT /auth exception: {exc}")
         return None
 
@@ -242,7 +249,11 @@ class MrktClient:
                 return result
 
         stale = self._cache_get(cache_key, allow_stale=True)
-        return stale if isinstance(stale, dict) else {}
+        if isinstance(stale, dict) and stale:
+            self._cache_set(cache_key, stale, ttl=30.0)
+            return stale
+        self._cache_set(cache_key, {}, ttl=20.0)
+        return {}
 
     async def get_floor_price(self, short_name: str) -> float | None:
         cols = await self.get_collections()
