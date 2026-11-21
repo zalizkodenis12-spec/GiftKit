@@ -13,7 +13,9 @@ from loguru import logger
 from backend.config import runtime_config
 from backend.models import MarketPricePoint
 from backend.services.getgems_client import KNOWN_GIFT_COLLECTION_ADDRESSES, getgems_client
+from backend.services.mrkt_client import mrkt_client
 from backend.services.portals_client import is_valid_uuid, portals_client, to_float
+from backend.services.tonnel_client import tonnel_client
 
 MARKET_FEES: dict[str, float] = {
     "portals": 5.0,
@@ -54,69 +56,21 @@ class MultiMarketAggregator:
         markets: list[str] = ["portals"]
         if getgems_client.getgems_live_ok or runtime_config.getgems_api_key:
             markets.append("getgems")
-        if runtime_config.mrkt_init_data:
+        if mrkt_client.last_live_ok or runtime_config.mrkt_init_data:
             markets.append("mrkt")
-        if runtime_config.tonnel_init_data:
+        if tonnel_client.last_live_ok or runtime_config.tonnel_init_data:
             markets.append("tonnel")
         return markets
 
     async def _try_mrkt_live_floor(self, short_name: str) -> float | None:
-        init_data = runtime_config.mrkt_init_data
-        if not init_data:
+        if not runtime_config.mrkt_init_data:
             return None
-        cache_key = f"mrkt:{short_name}"
-        now = time.monotonic()
-        if cache_key in self._external_cache and now < self._external_cache[cache_key][1]:
-            return self._external_cache[cache_key][0]
-        try:
-            client = self._get_client()
-            resp = await client.get(
-                "https://api.tgmrkt.io/api/v1/gifts/collections",
-                headers={"Authorization": init_data},
-            )
-            if resp.status_code == 200:
-                items = resp.json()
-                if isinstance(items, list):
-                    for col in items:
-                        name = str(col.get("name") or "").lower().replace(" ", "")
-                        floor_nano = to_float(col.get("floorPriceNanoTokens"), 0.0)
-                        floor = round(floor_nano / 1e9, 2) if floor_nano > 10000 else floor_nano
-                        if name and floor > 0:
-                            self._external_cache[f"mrkt:{name}"] = (floor, now + 60.0)
-                if cache_key in self._external_cache:
-                    return self._external_cache[cache_key][0]
-        except Exception as exc:
-            logger.debug(f"MRKT live fetch skipped: {exc}")
-        return None
+        return await mrkt_client.get_floor_price(short_name)
 
     async def _try_tonnel_live_floor(self, short_name: str) -> float | None:
-        init_data = runtime_config.tonnel_init_data
-        if not init_data:
+        if not runtime_config.tonnel_init_data:
             return None
-        cache_key = f"tonnel:{short_name}"
-        now = time.monotonic()
-        if cache_key in self._external_cache and now < self._external_cache[cache_key][1]:
-            return self._external_cache[cache_key][0]
-        try:
-            client = self._get_client()
-            resp = await client.post(
-                "https://gifts2.tonnel.network/api/filterStats",
-                json={"authData": init_data},
-            )
-            if resp.status_code == 200:
-                payload = resp.json()
-                data = payload.get("data") if isinstance(payload, dict) else None
-                if isinstance(data, dict):
-                    for k, v in data.items():
-                        clean = str(k).lower().replace(" ", "")
-                        floor = to_float((v or {}).get("floorPrice") if isinstance(v, dict) else v, 0.0)
-                        if clean and floor > 0:
-                            self._external_cache[f"tonnel:{clean}"] = (floor, now + 60.0)
-                if cache_key in self._external_cache:
-                    return self._external_cache[cache_key][0]
-        except Exception as exc:
-            logger.debug(f"Tonnel live fetch skipped: {exc}")
-        return None
+        return await tonnel_client.get_floor_price(short_name)
 
     async def get_market_prices_for_collection(
         self,
@@ -188,7 +142,12 @@ class MultiMarketAggregator:
             )
 
         # 3. MRKT (LIVE if initData provided, else live-anchored with is_live=False)
-        mrkt_url = f"https://t.me/mrkt/app?startapp={short}_{number}" if number > 0 else "https://t.me/mrkt/app"
+        mrkt_uuid = item_id[5:] if item_id.startswith("mrkt-") else (item_id if is_valid_uuid(item_id) else "")
+        mrkt_url = (
+            f"https://t.me/mrkt/app?startapp=gift_{mrkt_uuid}"
+            if mrkt_uuid and item_id.startswith("mrkt-")
+            else "https://t.me/mrkt/app"
+        )
         mrkt_live = await self._try_mrkt_live_floor(short)
         if mrkt_live and mrkt_live > 0:
             points.append(
@@ -213,10 +172,11 @@ class MultiMarketAggregator:
             )
 
         # 4. Tonnel (LIVE if initData provided, else live-anchored with is_live=False)
+        tonnel_id = item_id[7:] if item_id.startswith("tonnel-") else ""
         tonnel_url = (
-            f"https://t.me/tonnel_network_bot/gift?startapp={short}_{number}"
-            if number > 0
-            else "https://t.me/tonnel_network_bot/gift"
+            f"https://t.me/tonnel_network_bot/gifts?startapp=gift_{tonnel_id}"
+            if tonnel_id
+            else "https://t.me/tonnel_network_bot/gifts"
         )
         tonnel_live = await self._try_tonnel_live_floor(short)
         if tonnel_live and tonnel_live > 0:

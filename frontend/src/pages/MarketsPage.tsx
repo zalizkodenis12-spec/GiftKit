@@ -72,21 +72,21 @@ const MARKET_DEFINITIONS = [
     key: 'mrkt',
     name: 'MRKT',
     field: 'mrkt_init_data' as const,
-    fieldLabel: 'MRKT Telegram initData (tgWebAppData)',
+    fieldLabel: 'MRKT Telegram initData (автооновлюється через MTProto)',
     fee: '4%',
-    desc: 'Прямі переходи на лоти працюють автоматично; для приватного стакана додайте tgWebAppData',
+    desc: 'Живі лоти, флори 135 колекцій та прямі переходи у @mrkt',
     guide:
-      'Як підключити приватний стакан @mrkt: відкрийте @mrkt у Telegram Web (web.telegram.org) -> натисніть F12 -> вкладка Network / Application -> скопіюйте рядок tgWebAppData (query_id=...&hash=...) і вставте нижче.',
+      'Оновлюється автоматично через Telethon MTProto (TG_API_ID + TG_API_HASH) кожні 30 хв або вручну через поле нижче.',
   },
   {
     key: 'tonnel',
     name: 'Tonnel',
     field: 'tonnel_init_data' as const,
-    fieldLabel: 'Tonnel Network initData (tgWebAppData)',
-    fee: '4%',
-    desc: 'Прямі переходи на лоти працюють автоматично; для приватного стакана додайте tgWebAppData',
+    fieldLabel: 'Tonnel Network initData (автооновлюється через MTProto)',
+    fee: '2.5%',
+    desc: 'Живі лоти, флори та прямі переходи у @tonnel_network_bot',
     guide:
-      'Як підключити приватний стакан @tonnel_network_bot: відкрийте @tonnel_network_bot у Telegram Web (web.telegram.org) -> натисніть F12 -> вкладка Network / Application -> скопіюйте рядок tgWebAppData (query_id=...&hash=...) і вставте нижче.',
+      'Оновлюється автоматично через Telethon MTProto (TG_API_ID + TG_API_HASH) кожні 30 хв після 1-разового входу сесії або вручну нижче.',
   },
   {
     key: 'fragment',

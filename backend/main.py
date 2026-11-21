@@ -53,10 +53,13 @@ from backend.services import auth_service
 from backend.services.analytics_engine import analytics_engine
 from backend.services.auth_service import DEFAULT_ADMIN_USER_ID
 from backend.services.getgems_client import getgems_client
+from backend.services.mrkt_client import mrkt_client
+from backend.services.mtproto_auth import mtproto_auth
 from backend.services.multi_market import multi_market
 from backend.services.portals_client import portals_client
 from backend.services.sniper_engine import sniper_engine
 from backend.services.telegram_bot import telegram_bot_service
+from backend.services.tonnel_client import tonnel_client
 from backend.services.trend_tracker import trend_tracker
 from backend.services.undercut_engine import undercut_engine
 from backend.services.visual_analyzer import visual_analyzer
@@ -77,8 +80,61 @@ async def _snapshot_loop() -> None:
         await asyncio.sleep(base_settings.SNAPSHOT_INTERVAL)
 
 
+async def _push_market_credentials_to_vercel() -> None:
+    """Securely sync live MRKT/Tonnel initData from local backend to Vercel production."""
+    if IS_VERCEL:
+        return
+    webapp_url = (runtime_config.webapp_url or "").strip().rstrip("/")
+    if not webapp_url.startswith("https://") or "t.me" in webapp_url:
+        return
+    mrkt_d = (runtime_config.mrkt_init_data or "").strip()
+    tonnel_d = (runtime_config.tonnel_init_data or "").strip()
+    if not mrkt_d and not tonnel_d:
+        return
+    try:
+        import httpx
+
+        sig = auth_service.get_bot_sync_signature()
+        if not sig:
+            return
+        async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=4.0)) as client:
+            resp = await client.post(
+                f"{webapp_url}/api/internal/bot-sync",
+                headers={"X-Bot-Sync-Signature": sig},
+                json={
+                    "user_id": runtime_config.tg_admin_chat_id or DEFAULT_ADMIN_USER_ID,
+                    "market_credentials": {
+                        "mrkt_init_data": mrkt_d,
+                        "tonnel_init_data": tonnel_d,
+                    },
+                },
+            )
+            if resp.status_code == 200:
+                logger.debug("Synced live MRKT/Tonnel credentials to Vercel production.")
+    except Exception as exc:
+        logger.debug(f"Vercel market credentials sync skipped: {exc}")
+
+
+async def _mtproto_sync_loop() -> None:
+    """Background loop: refreshes MRKT & Tonnel initData via Telethon every 30 min and syncs to Vercel."""
+    await asyncio.sleep(3)
+    last_mtproto_refresh = 0.0
+    while True:
+        try:
+            now = asyncio.get_running_loop().time()
+            if mtproto_auth.is_authorized and (now - last_mtproto_refresh >= 1800.0):
+                await mtproto_auth.refresh_all_init_data()
+                last_mtproto_refresh = now
+            await _push_market_credentials_to_vercel()
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.debug(f"MTProto sync loop skipped: {exc}")
+        await asyncio.sleep(75)
+
+
 async def _warmup_cache() -> None:
-    """Warm Portals/Getgems & 24h Trend caches immediately at boot so first Mini App load is instant."""
+    """Warm Portals/Getgems/MRKT & 24h Trend caches immediately at boot so first Mini App load is instant."""
     try:
         await asyncio.gather(
             analytics_engine.get_collections_summary(limit=100),
@@ -101,14 +157,17 @@ async def lifespan(app: FastAPI):
 
     snapshot_task: asyncio.Task[None] | None = None
     warmup_task: asyncio.Task[None] | None = None
+    mtproto_sync_task: asyncio.Task[None] | None = None
 
     if IS_VERCEL:
         logger.info("GiftKit backend started in Vercel Serverless mode (background loops & polling skipped)")
     else:
+        await mtproto_auth.startup()
         await telegram_bot_service.start()
         sniper_engine.start()
         undercut_engine.start()
         snapshot_task = asyncio.create_task(_snapshot_loop(), name="price_snapshot_loop")
+        mtproto_sync_task = asyncio.create_task(_mtproto_sync_loop(), name="mtproto_sync_loop")
         warmup_task = asyncio.create_task(_warmup_cache(), name="cache_warmup")
         logger.info("GiftKit backend started successfully")
 
@@ -117,6 +176,12 @@ async def lifespan(app: FastAPI):
     finally:
         if warmup_task is not None:
             warmup_task.cancel()
+        if mtproto_sync_task is not None:
+            mtproto_sync_task.cancel()
+            try:
+                await mtproto_sync_task
+            except asyncio.CancelledError:
+                pass
         if snapshot_task is not None:
             snapshot_task.cancel()
             try:
@@ -126,9 +191,12 @@ async def lifespan(app: FastAPI):
         if not IS_VERCEL:
             await sniper_engine.stop()
             await undercut_engine.stop()
+        await mtproto_auth.shutdown()
         await telegram_bot_service.stop()
         await visual_analyzer.close()
         await portals_client.close()
+        await mrkt_client.close()
+        await tonnel_client.close()
         await getgems_client.close()
         await multi_market.close()
         await db.close()
@@ -450,6 +518,20 @@ async def post_internal_bot_sync(
     envelope = body.get("state_envelope")
     if isinstance(envelope, dict):
         await db.import_user_state(uid, envelope)
+
+    m_creds = body.get("market_credentials")
+    if isinstance(m_creds, dict):
+        cred_updates: dict[str, str] = {}
+        new_mrkt = str(m_creds.get("mrkt_init_data") or "").strip()
+        new_tonnel = str(m_creds.get("tonnel_init_data") or "").strip()
+        if new_mrkt and new_mrkt != runtime_config.mrkt_init_data:
+            cred_updates["mrkt_init_data"] = new_mrkt
+        if new_tonnel and new_tonnel != runtime_config.tonnel_init_data:
+            cred_updates["tonnel_init_data"] = new_tonnel
+        if cred_updates:
+            await db.save_settings(cred_updates)
+            analytics_engine.clear_caches()
+            logger.info(f"Updated live market credentials via bot-sync: {list(cred_updates.keys())}")
 
     alerts = body.get("alerts")
     if isinstance(alerts, list):
@@ -980,6 +1062,58 @@ async def delete_portfolio_item(item_id: int, request: Request) -> dict[str, Any
 # ==============================================================================
 
 
+@app.get("/api/markets/mtproto/status")
+async def get_mtproto_status() -> dict[str, Any]:
+    return {
+        **mtproto_auth.get_status(),
+        "mrkt_live": mrkt_client.last_live_ok,
+        "mrkt_error": mrkt_client.last_error,
+        "tonnel_live": tonnel_client.last_live_ok,
+        "tonnel_error": tonnel_client.last_error,
+    }
+
+
+@app.post("/api/markets/mtproto/send-code")
+async def post_mtproto_send_code(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    if IS_VERCEL:
+        raise HTTPException(
+            status_code=400,
+            detail="Авторизація MTProto виконується на локальному ПК (скрипт connect_telegram_session.py), після чого токени автосинхронізуються сюди.",
+        )
+    phone = str(body.get("phone") or "").strip()
+    res = await mtproto_auth.send_login_code(phone)
+    if res.get("already_authorized"):
+        await _push_market_credentials_to_vercel()
+    return res
+
+
+@app.post("/api/markets/mtproto/verify-code")
+async def post_mtproto_verify_code(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    if IS_VERCEL:
+        raise HTTPException(
+            status_code=400,
+            detail="Авторизація MTProto виконується на локальному ПК, після чого токени автосинхронізуються сюди.",
+        )
+    code = str(body.get("code") or "").strip()
+    password = str(body.get("password") or "").strip()
+    phone = str(body.get("phone") or "").strip()
+    res = await mtproto_auth.verify_login_code(code=code, password=password, phone=phone)
+    if res.get("ok"):
+        analytics_engine.clear_caches()
+        await _push_market_credentials_to_vercel()
+    return res
+
+
+@app.post("/api/markets/mtproto/refresh")
+async def post_mtproto_refresh() -> dict[str, Any]:
+    if IS_VERCEL:
+        return {"ok": False, "error": "Запустіть локальний бекенд для автооновлення через Telethon"}
+    res = await mtproto_auth.refresh_all_init_data()
+    analytics_engine.clear_caches()
+    await _push_market_credentials_to_vercel()
+    return {"ok": True, **res, "status": mtproto_auth.get_status()}
+
+
 @app.get("/api/settings")
 async def get_settings(request: Request) -> dict[str, Any]:
     user = await get_request_user(request)
@@ -997,10 +1131,16 @@ async def get_settings(request: Request) -> dict[str, Any]:
 async def patch_settings(request: Request, body: SettingsUpdate) -> dict[str, Any]:
     updates = body.model_dump(exclude_none=True)
     if IS_VERCEL:
-        for secret_k in SECRET_KEYS:
+        # Allow user to supply their own MRKT/Tonnel initData in the Markets tab, protect bot/AI keys
+        protected = SECRET_KEYS - {"mrkt_init_data", "tonnel_init_data", "portals_init_data"}
+        for secret_k in protected:
             updates.pop(secret_k, None)
     old_token = runtime_config.tg_bot_token
     await db.save_settings(updates)
+    if "mrkt_init_data" in updates or "tonnel_init_data" in updates:
+        analytics_engine.clear_caches()
+        if not IS_VERCEL:
+            await _push_market_credentials_to_vercel()
 
     if "tg_bot_token" in updates and runtime_config.tg_bot_token != old_token:
         if IS_VERCEL:

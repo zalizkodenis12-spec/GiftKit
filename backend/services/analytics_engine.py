@@ -13,6 +13,7 @@ from typing import Any
 
 from loguru import logger
 
+from backend.config import runtime_config
 from backend.database import db, utc_now_iso
 from backend.models import (
     AnalyzedListing,
@@ -26,6 +27,7 @@ from backend.models import (
     WhaleEvent,
 )
 from backend.services.getgems_client import getgems_client
+from backend.services.mrkt_client import mrkt_client
 from backend.services.multi_market import MARKET_FEES, multi_market
 from backend.services.portals_client import (
     collection_photo_url,
@@ -35,6 +37,7 @@ from backend.services.portals_client import (
     to_float,
     to_int,
 )
+from backend.services.tonnel_client import tonnel_client
 from backend.services.trend_tracker import trend_tracker
 from backend.services.visual_analyzer import analyze_number_pattern, analyze_symbol_trait, visual_analyzer
 
@@ -193,6 +196,8 @@ class AnalyticsEngine:
         self._listings_cache = None
         self._thin_floor_cache.clear()
         portals_client.clear_cache()
+        mrkt_client.clear_cache()
+        tonnel_client.clear_cache()
 
     async def inspect_thin_floor(
         self, collection_id: str, short_name: str, floor_price: float
@@ -573,7 +578,10 @@ class AnalyticsEngine:
             thin_warning = f"До +{col.thin_floor_gap_percent:.0f}% залишилось {col.thin_floor_count} лот{'и' if col.thin_floor_count > 1 else ''}"
 
         photo_url = gift_photo_url(short_name, number, raw.get("photo_url"))
-        if market == "portals":
+        explicit_market_url = str(raw.get("market_url") or "").strip()
+        if explicit_market_url:
+            market_url = explicit_market_url
+        elif market == "portals":
             if is_valid_uuid(item_id):
                 market_url = f"https://t.me/portals_market_bot/market?startapp=gift_{item_id}"
             elif is_valid_uuid(effective_col_id):
@@ -589,6 +597,12 @@ class AnalyticsEngine:
         else:
             market_url = next((p.url for p in mpoints if p.market == market), f"https://t.me/nft/{effective_tg_id}")
         listed_at = str(raw.get("listed_at") or utc_now_iso())
+
+        listing_is_live = (
+            (market == "portals" and portals_client.last_live_ok)
+            or (market == "mrkt" and mrkt_client.last_live_ok)
+            or (market == "tonnel" and tonnel_client.last_live_ok)
+        )
 
         return AnalyzedListing(
             id=item_id,
@@ -630,7 +644,7 @@ class AnalyticsEngine:
             attributes=attributes,
             market_prices=mpoints,
             recent_sales=generate_recent_sales(short_name, (collection_floor + model_floor) / 2.0, sales_24h, 4),
-            is_live=(market == "portals" and portals_client.last_live_ok),
+            is_live=listing_is_live,
         )
 
     @staticmethod
@@ -739,6 +753,14 @@ class AnalyticsEngine:
         portals_search = clean_search.lstrip("#").strip() if clean_search else None
         page_num = max(0, int(page or 0))
         batch_limit = max(20, min(int(limit or 50), 50))
+        wanted_markets = {
+            m.strip().lower()
+            for m in (market or "").split(",")
+            if m.strip() and m.strip().lower() != "all"
+        }
+        only_external = bool(wanted_markets) and wanted_markets.issubset({"mrkt", "tonnel"})
+        want_mrkt = bool(runtime_config.mrkt_init_data) and ((not wanted_markets) or ("mrkt" in wanted_markets))
+        want_tonnel = bool(runtime_config.tonnel_init_data) and ((not wanted_markets) or ("tonnel" in wanted_markets))
 
         now = time.monotonic()
         use_global_cache = (
@@ -746,6 +768,7 @@ class AnalyticsEngine:
             and not clean_collection
             and not portals_search
             and not min_price
+            and not only_external
             and sort != "price_asc"
             and not force_refresh
             and self._listings_cache
@@ -766,6 +789,7 @@ class AnalyticsEngine:
                     and not clean_collection
                     and not portals_search
                     and not min_price
+                    and not only_external
                     and sort != "price_asc"
                     and not force_refresh
                     and self._listings_cache
@@ -775,15 +799,43 @@ class AnalyticsEngine:
                     has_more = True
                 else:
                     col_id_param: str | None = None
+                    col_display_name: str | None = None
                     if clean_collection:
                         col_obj = col_by_short.get(clean_collection)
                         if col_obj:
                             col_id_param = col_obj.id
+                            col_display_name = col_obj.name
 
                     merged_raw: list[dict[str, Any]] = []
                     used_price_ladder = False
 
-                    if col_id_param or portals_search:
+                    if only_external:
+                        # Dedicated live MRKT and/or Tonnel feed with full pagination
+                        if want_mrkt:
+                            m_items, m_more = await mrkt_client.search_nfts(
+                                collection_name=col_display_name,
+                                sort=sort,
+                                count=batch_limit,
+                                page=page_num,
+                                search=portals_search,
+                                force_refresh=force_refresh,
+                            )
+                            merged_raw.extend(m_items)
+                            if m_more:
+                                has_more = True
+                        if want_tonnel:
+                            t_items, t_more = await tonnel_client.search_nfts(
+                                collection_name=col_display_name,
+                                sort=sort,
+                                limit=min(batch_limit, 30),
+                                page=page_num,
+                                search=portals_search,
+                                force_refresh=force_refresh,
+                            )
+                            merged_raw.extend(t_items)
+                            if t_more:
+                                has_more = True
+                    elif col_id_param or portals_search:
                         if sort == "price_asc":
                             used_price_ladder = True
                             if page_num == 0:
@@ -969,6 +1021,39 @@ class AnalyticsEngine:
                         if prices:
                             next_min_price = round(max(prices), 2)
 
+                    # Blend live MRKT & Tonnel listings into multi-market ("Всі") feed
+                    if not only_external:
+                        if want_mrkt:
+                            try:
+                                m_items, m_more = await mrkt_client.search_nfts(
+                                    collection_name=col_display_name,
+                                    sort=sort,
+                                    count=20,
+                                    page=page_num,
+                                    search=portals_search,
+                                    force_refresh=force_refresh,
+                                )
+                                merged_raw.extend(m_items)
+                                if m_more:
+                                    has_more = True
+                            except Exception as exc:
+                                logger.debug(f"MRKT blend skipped: {exc}")
+                        if want_tonnel:
+                            try:
+                                t_items, t_more = await tonnel_client.search_nfts(
+                                    collection_name=col_display_name,
+                                    sort=sort,
+                                    limit=15,
+                                    page=page_num,
+                                    search=portals_search,
+                                    force_refresh=force_refresh,
+                                )
+                                merged_raw.extend(t_items)
+                                if t_more:
+                                    has_more = True
+                            except Exception as exc:
+                                logger.debug(f"Tonnel blend skipped: {exc}")
+
                     # Deduplicate merged_raw
                     seen_raw: set[str] = set()
                     dedup_raw: list[dict[str, Any]] = []
@@ -979,9 +1064,9 @@ class AnalyticsEngine:
                             dedup_raw.append(item)
                     merged_raw = dedup_raw
 
-                    # Graceful fallback ONLY on page 0 if Portals /nfts/search is completely unreachable
+                    # Graceful fallback ONLY on page 0 if all live markets are unreachable
                     used_fallback = False
-                    if not merged_raw and page_num == 0 and not portals_search:
+                    if not merged_raw and page_num == 0 and not portals_search and not only_external:
                         used_fallback = True
                         has_more = False
                         target_cols = (
@@ -1024,8 +1109,9 @@ class AnalyticsEngine:
 
                     analyzed = []
                     for raw in merged_raw:
+                        raw_market = str(raw.get("market") or "portals").lower()
                         res = await self.analyze_raw_listing(
-                            raw, col_by_id, col_by_short, filters_map, gg_stats, market="portals"
+                            raw, col_by_id, col_by_short, filters_map, gg_stats, market=raw_market
                         )
                         if res:
                             if used_fallback:
@@ -1040,6 +1126,7 @@ class AnalyticsEngine:
                         and not clean_collection
                         and not portals_search
                         and not min_price
+                        and not only_external
                         and sort != "price_asc"
                         and analyzed
                     ):
@@ -1131,12 +1218,24 @@ class AnalyticsEngine:
         all_candidates: list[AnalyzedListing] = list(cached_listings)
         existing_ids = {x.id for x in all_candidates}
         extra_raw = [r for r in (cheap_raw or []) if str(r.get("id") or "") not in existing_ids]
+        if runtime_config.mrkt_init_data:
+            try:
+                mrkt_cheap, _ = await mrkt_client.search_nfts(sort="price_asc", count=20, page=0)
+                for r in mrkt_cheap:
+                    if str(r.get("id") or "") not in existing_ids:
+                        extra_raw.append(r)
+            except Exception as exc:
+                logger.debug(f"MRKT arbitrage candidates skipped: {exc}")
         if extra_raw:
             short_names = list(
                 {
-                    col_by_id[str(r.get("collection_id") or "")].short_name
+                    (
+                        col_by_id[str(r.get("collection_id") or "")].short_name
+                        if str(r.get("collection_id") or "") in col_by_id
+                        else str(r.get("name") or "").lower().replace(" ", "")
+                    )
                     for r in extra_raw
-                    if str(r.get("collection_id") or "") in col_by_id
+                    if str(r.get("collection_id") or "") in col_by_id or r.get("name")
                 }
             )[:15]
             f_map, gg_s = await asyncio.gather(
@@ -1144,7 +1243,8 @@ class AnalyticsEngine:
                 getgems_client.get_bulk_stats(short_names[:5]),
             )
             for raw in extra_raw:
-                analyzed = await self.analyze_raw_listing(raw, col_by_id, col_by_short, f_map, gg_s, market="portals")
+                raw_m = str(raw.get("market") or "portals").lower()
+                analyzed = await self.analyze_raw_listing(raw, col_by_id, col_by_short, f_map, gg_s, market=raw_m)
                 if analyzed:
                     all_candidates.append(analyzed)
 

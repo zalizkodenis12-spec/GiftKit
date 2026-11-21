@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     TG_ADMIN_CHAT_ID: str = ""
     WEBAPP_URL: str = "https://t.me"
 
+    # Official Telegram MTProto Client API (for automated MRKT & Tonnel initData refresh)
+    TG_API_ID: int = 0
+    TG_API_HASH: str = ""
+    TG_SESSION_STRING: str = ""
+
     # External Marketplace Credentials (optional for enhanced live access)
     GETGEMS_API_KEY: str = ""
     PORTALS_INIT_DATA: str = ""
@@ -87,6 +92,9 @@ SETTINGS_KEYS: dict[str, tuple[str, type]] = {
     "tg_bot_token": ("TG_BOT_TOKEN", str),
     "tg_admin_chat_id": ("TG_ADMIN_CHAT_ID", str),
     "webapp_url": ("WEBAPP_URL", str),
+    "tg_api_id": ("TG_API_ID", int),
+    "tg_api_hash": ("TG_API_HASH", str),
+    "tg_session_string": ("TG_SESSION_STRING", str),
     "getgems_api_key": ("GETGEMS_API_KEY", str),
     "portals_init_data": ("PORTALS_INIT_DATA", str),
     "mrkt_init_data": ("MRKT_INIT_DATA", str),
@@ -97,6 +105,8 @@ SETTINGS_KEYS: dict[str, tuple[str, type]] = {
 
 SECRET_KEYS = {
     "tg_bot_token",
+    "tg_api_hash",
+    "tg_session_string",
     "getgems_api_key",
     "portals_init_data",
     "mrkt_init_data",
@@ -133,6 +143,11 @@ class RuntimeConfig:
             if isinstance(value, bool):
                 return value
             return str(value).strip().lower() in {"1", "true", "yes", "on"}
+        if target_type is int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return 0
         if target_type is float:
             try:
                 return float(value)
@@ -191,6 +206,21 @@ class RuntimeConfig:
     @property
     def webapp_url(self) -> str:
         return str(self.get("webapp_url")) or "https://t.me"
+
+    @property
+    def tg_api_id(self) -> int:
+        try:
+            return int(self.get("tg_api_id") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @property
+    def tg_api_hash(self) -> str:
+        return str(self.get("tg_api_hash") or "")
+
+    @property
+    def tg_session_string(self) -> str:
+        return str(self.get("tg_session_string") or "")
 
     @property
     def getgems_api_key(self) -> str:
