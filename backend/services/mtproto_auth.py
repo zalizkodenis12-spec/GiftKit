@@ -200,18 +200,19 @@ class MtprotoAuthService:
 
     @staticmethod
     def _extract_init_data_from_webview_url(url: str) -> str:
-        """Extract decoded tgWebAppData parameter from Telegram WebView URL fragment."""
+        """Extract properly signed tgWebAppData parameter from Telegram WebView URL fragment."""
         if not url or "tgWebAppData=" not in url:
             return ""
         parsed = urllib.parse.urlparse(url)
-        frag_params = urllib.parse.parse_qs(parsed.fragment)
+        # parse_qs already performs the single URL-decode needed (keeping user=%7B... intact for HMAC!)
+        frag_params = urllib.parse.parse_qs(parsed.fragment, keep_blank_values=True)
         raw_list = frag_params.get("tgWebAppData")
         if raw_list and raw_list[0]:
-            return urllib.parse.unquote(raw_list[0]).strip()
-        q_params = urllib.parse.parse_qs(parsed.query)
+            return raw_list[0].strip()
+        q_params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
         raw_q = q_params.get("tgWebAppData")
         if raw_q and raw_q[0]:
-            return urllib.parse.unquote(raw_q[0]).strip()
+            return raw_q[0].strip()
         return ""
 
     async def _fetch_bot_init_data(
@@ -269,7 +270,7 @@ class MtprotoAuthService:
                 init_data = await self._fetch_bot_init_data("mrkt", "app", "https://cdn.tgmrkt.io")
                 if init_data:
                     runtime_config.apply_overrides({"mrkt_init_data": init_data})
-                    await db.set_setting("mrkt_init_data", init_data)
+                    await db.save_settings({"mrkt_init_data": init_data})
                     self._persist_env_values({"MRKT_INIT_DATA": init_data})
                     logger.info("MTProto refreshed live MRKT initData successfully.")
                     return True
@@ -290,7 +291,7 @@ class MtprotoAuthService:
                 )
                 if init_data:
                     runtime_config.apply_overrides({"tonnel_init_data": init_data})
-                    await db.set_setting("tonnel_init_data", init_data)
+                    await db.save_settings({"tonnel_init_data": init_data})
                     self._persist_env_values({"TONNEL_INIT_DATA": init_data})
                     logger.info("MTProto refreshed live Tonnel initData successfully.")
                     return True
