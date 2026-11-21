@@ -80,6 +80,11 @@ class MtprotoAuthService:
                 session_arg,
                 runtime_config.tg_api_id,
                 runtime_config.tg_api_hash,
+                device_model="PC 64bit",
+                system_version="Windows 10",
+                app_version="5.10.0",
+                lang_code="en",
+                system_lang_code="en-US",
             )
         if not self._client.is_connected():
             await self._client.connect()
