@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -350,15 +351,18 @@ class MrktClient:
 
         col_name = str(g.get("collectionName") or g.get("collectionTitle") or g.get("title") or "").strip()
         number = to_int(g.get("number"), 0)
+        clean_short = re.sub(r"[^a-z0-9]", "", col_name.lower())
+        pascal_col = re.sub(r"[^a-zA-Z0-9]", "", col_name)
         tg_slug = str(g.get("name") or "").strip()
-        if not tg_slug and col_name and number:
-            tg_slug = f"{col_name.replace(' ', '')}-{number}"
+        if not tg_slug and pascal_col and number:
+            tg_slug = f"{pascal_col}-{number}"
 
         floor_nano = to_float(g.get("floorPriceNanoTONsByCollection"), 0.0)
         floor_ton = round(floor_nano / 1e9, 2) if floor_nano > 10000 else round(floor_nano, 2)
 
         # Official Telegram Fragment high-res gift image (exact background + model + symbol)
-        photo_url = f"https://nft.fragment.com/gift/{tg_slug.lower()}.large.jpg" if tg_slug else ""
+        frag_slug = re.sub(r"[^a-z0-9-]", "", tg_slug.lower()) if tg_slug else (f"{clean_short}-{number}" if clean_short and number else "")
+        photo_url = f"https://nft.fragment.com/gift/{frag_slug}.large.jpg" if frag_slug else ""
         if not photo_url:
             thumb = str(g.get("modelStickerThumbnailKey") or "").strip()
             if thumb:

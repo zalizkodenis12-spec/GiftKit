@@ -13,6 +13,7 @@ interface NftCardProps {
 export const NftCard: React.FC<NftCardProps> = ({ item, tonUsd, onSelect }) => {
   const marketMeta = getMarketMeta(item.market);
   const modelAttr = item.attributes?.find((a) => a.type === 'model');
+  const backdropAttr = item.attributes?.find((a) => a.type === 'backdrop');
   const isProfitable = item.net_profit_ton >= 0;
 
   return (
@@ -30,6 +31,10 @@ export const NftCard: React.FC<NftCardProps> = ({ item, tonUsd, onSelect }) => {
           src={item.photo_url}
           alt={`${item.collection_name} #${item.number}`}
           fallbackText={item.collection_name}
+          collectionName={item.collection_name}
+          shortName={item.short_name}
+          modelName={modelAttr?.value}
+          backdropName={backdropAttr?.value}
           className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300"
         />
 

@@ -172,6 +172,10 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
                       src={item.photo_url || item.listing?.photo_url}
                       alt={`${item.collection_name} #${item.number}`}
                       fallbackText={item.collection_name}
+                      collectionName={item.collection_name}
+                      shortName={item.short_name}
+                      modelName={item.listing?.attributes?.find((a) => a.type === 'model')?.value}
+                      backdropName={item.listing?.attributes?.find((a) => a.type === 'backdrop')?.value}
                       className="w-full h-full object-cover"
                     />
                   </div>

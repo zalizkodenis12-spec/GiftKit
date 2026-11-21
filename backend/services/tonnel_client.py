@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
+import urllib.parse
 from typing import Any
 
 import httpx
@@ -207,8 +209,10 @@ class TonnelClient:
         if not gift_id or not col_name or price <= 0:
             return None
 
-        tg_slug = f"{col_name.replace(' ', '')}-{number}" if number > 0 else col_name.replace(" ", "")
-        photo_url = f"https://nft.fragment.com/gift/{tg_slug.lower()}.large.jpg" if number > 0 else ""
+        clean_short = re.sub(r"[^a-z0-9]", "", col_name.lower())
+        pascal_col = re.sub(r"[^a-zA-Z0-9]", "", col_name)
+        tg_slug = f"{pascal_col}-{number}" if number > 0 else pascal_col
+        photo_url = f"https://nft.fragment.com/gift/{clean_short}-{number}.large.jpg" if (clean_short and number > 0) else ""
 
         def _parse_trait(raw_val: Any) -> tuple[str, float]:
             txt = str(raw_val or "").strip()

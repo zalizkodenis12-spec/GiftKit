@@ -252,6 +252,10 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
               <NftImage
                 src={item.photo_url}
                 alt={item.collection_name}
+                collectionName={item.collection_name}
+                shortName={item.short_name}
+                modelName={item.attributes?.find((a) => a.type === 'model')?.value}
+                backdropName={item.attributes?.find((a) => a.type === 'backdrop')?.value}
                 className="w-full h-full object-cover"
               />
             </div>
