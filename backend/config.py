@@ -135,7 +135,11 @@ class RuntimeConfig:
             if key not in SETTINGS_KEYS:
                 continue
             _, expected_type = SETTINGS_KEYS[key]
-            self._overrides[key] = self._coerce(raw_val, expected_type)
+            coerced = self._coerce(raw_val, expected_type)
+            # Never overwrite an existing .env secret with an empty or masked value from DB/UI
+            if key in SECRET_KEYS and (coerced == "" or "•" in str(coerced)):
+                continue
+            self._overrides[key] = coerced
 
     @staticmethod
     def _coerce(value: Any, target_type: type) -> Any:
