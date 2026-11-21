@@ -404,7 +404,7 @@ class MrktClient:
         if sort == "price_desc":
             ordering, low_to_high = "Price", False
         elif sort == "newest":
-            ordering, low_to_high = "Latest", False
+            ordering, low_to_high = "None", False
         else:
             ordering, low_to_high = "Price", True
 
