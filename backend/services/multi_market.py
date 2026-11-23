@@ -144,7 +144,7 @@ class MultiMarketAggregator:
         # 3. MRKT (LIVE if initData provided, else live-anchored with is_live=False)
         mrkt_uuid = item_id[5:] if item_id.startswith("mrkt-") else (item_id if is_valid_uuid(item_id) else "")
         mrkt_url = (
-            f"https://t.me/mrkt/app?startapp=gift_{mrkt_uuid}"
+            f"https://t.me/mrkt/app?startapp={mrkt_uuid.replace('-', '')}"
             if mrkt_uuid and item_id.startswith("mrkt-")
             else "https://t.me/mrkt/app"
         )

@@ -627,8 +627,8 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
                 const meta = getMarketMeta(mp.market);
                 const isBest = mp.market === item.best_sell_market;
                 const rowUrl =
-                  mp.url ||
                   (mp.market === item.market && item.market_url ? item.market_url : null) ||
+                  mp.url ||
                   `https://t.me/nft/${item.tg_id}`;
                 return (
                   <button

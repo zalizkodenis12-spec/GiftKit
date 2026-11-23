@@ -369,6 +369,12 @@ class MrktClient:
 
         start = max(0, page) * count
         chunk = items[start : start + count]
+        for g in chunk:
+            muuid = str(g.get("mrkt_uuid") or "").strip()
+            if not muuid and str(g.get("id") or "").startswith("mrkt-"):
+                muuid = str(g["id"])[5:]
+            if muuid:
+                g["market_url"] = f"https://t.me/mrkt/app?startapp={muuid.replace('-', '')}"
         return chunk, (start + count) < len(items)
 
     async def search_nfts(
@@ -526,7 +532,7 @@ class MrktClient:
             "attributes": attributes,
             "listed_at": str(g.get("receivedDate") or utc_now_iso()),
             "market": "mrkt",
-            "market_url": f"https://t.me/mrkt/app?startapp=gift_{raw_id}",
+            "market_url": f"https://t.me/mrkt/app?startapp={raw_id.replace('-', '')}",
         }
 
 

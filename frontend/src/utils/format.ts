@@ -115,11 +115,15 @@ export function haptic(style: 'light' | 'medium' | 'success' | 'warning' = 'ligh
 export function openExternalLink(url?: string | null): void {
   if (!url) return;
   try {
-    if (
-      (url.startsWith('https://t.me/') || url.startsWith('tg://')) &&
-      window.Telegram?.WebApp?.openTelegramLink
-    ) {
-      window.Telegram.WebApp.openTelegramLink(url);
+    const wa = window.Telegram?.WebApp as
+      | { openTelegramLink?: (u: string) => void; openLink?: (u: string) => void }
+      | undefined;
+    if ((url.startsWith('https://t.me/') || url.startsWith('tg://')) && typeof wa?.openTelegramLink === 'function') {
+      wa.openTelegramLink(url);
+      return;
+    }
+    if ((url.startsWith('https://') || url.startsWith('http://')) && typeof wa?.openLink === 'function') {
+      wa.openLink(url);
       return;
     }
   } catch {

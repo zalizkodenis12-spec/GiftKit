@@ -224,8 +224,26 @@ class GetgemsAndTonClient:
         force_refresh: bool = False,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Fetch real live on-sale Getgems NFTs via official TonAPI v2 (zero API keys required)."""
+        import base64
         import re
+        import struct
         from backend.database import utc_now_iso
+
+        def _raw_to_eq_address(raw_addr: str) -> str:
+            if not raw_addr or ":" not in raw_addr:
+                return raw_addr
+            try:
+                wc_s, hex_h = raw_addr.split(":", 1)
+                wc = int(wc_s) & 0xFF
+                body = bytes([0x11, wc]) + bytes.fromhex(hex_h)
+                crc = 0
+                for b in body:
+                    crc ^= b << 8
+                    for _ in range(8):
+                        crc = ((crc << 1) ^ 0x1021) & 0xFFFF if (crc & 0x8000) else (crc << 1) & 0xFFFF
+                return base64.urlsafe_b64encode(body + struct.pack(">H", crc)).decode("ascii")
+            except Exception:
+                return raw_addr
 
         clean_col = re.sub(r"[^a-z0-9]", "", (collection_short or "").strip().lower())
         clean_search = (search or "").strip().lstrip("#").lower()
@@ -325,9 +343,10 @@ class GetgemsAndTonClient:
                     if not photo_url:
                         photo_url = f"https://nft.fragment.com/gift/{short_k}-{number}.large.jpg"
 
+                    friendly_addr = _raw_to_eq_address(addr)
                     out.append(
                         {
-                            "id": f"getgems-{addr}",
+                            "id": f"getgems-{friendly_addr}",
                             "tg_id": tg_id,
                             "name": col_name,
                             "external_collection_number": number,
@@ -337,7 +356,7 @@ class GetgemsAndTonClient:
                             "attributes": attrs,
                             "listed_at": utc_now_iso(),
                             "market": "getgems",
-                            "market_url": f"https://getgems.io/nft/{addr}",
+                            "market_url": f"https://getgems.io/nft/{friendly_addr}",
                         }
                     )
             except Exception as exc:
