@@ -236,14 +236,15 @@ class TonnelClient:
         if s_name:
             attributes.append({"type": "symbol", "value": s_name, "rarity_per_mille": s_rar})
 
-        # Official Changes.tg model PNG returns 200 OK for 100% of both off-chain and on-chain Tonnel gifts!
-        if col_name and m_name:
+        # Primary: full official Fragment card (backdrop + pattern + model) for on-chain gifts;
+        # NftImage automatically composites official backdrop + pattern + model PNG for off-chain gifts!
+        if clean_short and number > 0:
+            photo_url = f"https://nft.fragment.com/gift/{clean_short}-{number}.large.jpg"
+        elif col_name and m_name:
             photo_url = (
                 f"https://cdn.changes.tg/gifts/models/"
                 f"{urllib.parse.quote(col_name)}/png/{urllib.parse.quote(m_name)}.png"
             )
-        elif clean_short and number > 0:
-            photo_url = f"https://nft.fragment.com/gift/{clean_short}-{number}.large.jpg"
         else:
             photo_url = ""
 

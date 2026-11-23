@@ -1,5 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import lottie, { type AnimationItem } from 'lottie-web';
+import React, { useEffect, useMemo, useState } from 'react';
 
 interface NftImageProps {
   src?: string;
@@ -10,7 +9,7 @@ interface NftImageProps {
   shortName?: string;
   modelName?: string;
   backdropName?: string;
-  animate?: boolean;
+  symbolName?: string;
 }
 
 // Official Telegram Gifts radial backdrop gradients [center, edge]
@@ -80,75 +79,53 @@ const BACKDROP_GRADIENTS: Record<string, [string, string]> = {
   sky: ['#66B8F0', '#317DB8'],
   vermilion: ['#E06F5B', '#9E3928'],
   caramel: ['#D19462', '#8F582C'],
-  'malachite': ['#58A97C', '#246B45'],
+  malachite: ['#58A97C', '#246B45'],
   'camo green': ['#7A8F6B', '#46573A'],
   'electric cyan': ['#5ED4E8', '#238CA3'],
-  'indigo': ['#6872C9', '#343D8A'],
-  'magenta': ['#D962A8', '#8F2968'],
-  'maroon': ['#9C4858', '#571E2A'],
-  'olive': ['#99A162', '#5F6632'],
-  'peach': ['#F0A884', '#B86A48'],
-  'pink': ['#EB8DB6', '#A84874'],
-  'red': ['#DB5E5E', '#8F2929'],
-  'teal': ['#4BA3A3', '#1F6363'],
-  'violet': ['#9E72D9', '#5A358F'],
-  'yellow': ['#E6C455', '#A6821E'],
+  indigo: ['#6872C9', '#343D8A'],
+  magenta: ['#D962A8', '#8F2968'],
+  maroon: ['#9C4858', '#571E2A'],
+  olive: ['#99A162', '#5F6632'],
+  peach: ['#F0A884', '#B86A48'],
+  pink: ['#EB8DB6', '#A84874'],
+  red: ['#DB5E5E', '#8F2929'],
+  teal: ['#4BA3A3', '#1F6363'],
+  violet: ['#9E72D9', '#5A358F'],
+  yellow: ['#E6C455', '#A6821E'],
 };
 
-// In-memory LRU cache for Lottie animation JSONs (shared across all cards)
-const lottieCache = new Map<string, Record<string, unknown> | null>();
-const lottieInFlight = new Map<string, Promise<Record<string, unknown> | null>>();
-
-async function fetchLottieJson(url: string): Promise<Record<string, unknown> | null> {
-  if (lottieCache.has(url)) {
-    return lottieCache.get(url) ?? null;
-  }
-  const existing = lottieInFlight.get(url);
-  if (existing) return existing;
-
-  const p = fetch(url, { mode: 'cors' })
-    .then(async (res) => {
-      if (!res.ok) return null;
-      const data = (await res.json()) as Record<string, unknown>;
-      if (data && typeof data === 'object' && ('layers' in data || 'v' in data)) {
-        return data;
-      }
-      return null;
-    })
-    .catch(() => null)
-    .then((data) => {
-      if (lottieCache.size > 160) {
-        const firstKey = lottieCache.keys().next().value;
-        if (firstKey) lottieCache.delete(firstKey);
-      }
-      lottieCache.set(url, data);
-      lottieInFlight.delete(url);
-      return data;
-    });
-
-  lottieInFlight.set(url, p);
-  return p;
-}
+// Official Telegram Gift background pattern orbital positions (matches Portals/Fragment/Tonnel cards)
+const PATTERN_SPOTS: Array<{ top: string; left: string; size: string; opacity: number; rot: number }> = [
+  { top: '8%', left: '16%', size: '12%', opacity: 0.24, rot: -12 },
+  { top: '6%', left: '46%', size: '11%', opacity: 0.2, rot: 8 },
+  { top: '10%', left: '76%', size: '12%', opacity: 0.24, rot: 14 },
+  { top: '34%', left: '7%', size: '13%', opacity: 0.22, rot: -8 },
+  { top: '34%', left: '82%', size: '13%', opacity: 0.22, rot: 10 },
+  { top: '62%', left: '9%', size: '12%', opacity: 0.22, rot: 12 },
+  { top: '62%', left: '80%', size: '12%', opacity: 0.22, rot: -10 },
+  { top: '83%', left: '20%', size: '11%', opacity: 0.2, rot: -6 },
+  { top: '85%', left: '50%', size: '11%', opacity: 0.18, rot: 5 },
+  { top: '82%', left: '75%', size: '11%', opacity: 0.2, rot: 14 },
+];
 
 function resolveBackdropGradient(backdropName?: string, seed?: string): string {
   const key = (backdropName || '').trim().toLowerCase();
   const exact = BACKDROP_GRADIENTS[key];
   if (exact) {
-    return `radial-gradient(circle at 50% 42%, ${exact[0]} 0%, ${exact[1]} 100%)`;
+    return `radial-gradient(circle at 50% 44%, ${exact[0]} 0%, ${exact[1]} 100%)`;
   }
   if (key) {
     const partial = Object.entries(BACKDROP_GRADIENTS).find(
       ([k]) => key.includes(k) || k.includes(key),
     );
     if (partial) {
-      return `radial-gradient(circle at 50% 42%, ${partial[1][0]} 0%, ${partial[1][1]} 100%)`;
+      return `radial-gradient(circle at 50% 44%, ${partial[1][0]} 0%, ${partial[1][1]} 100%)`;
     }
   }
-  // Clean soft TON radial backdrop when backdrop name isn't known
   const s = (seed || 'gift').length % 3;
-  if (s === 0) return 'radial-gradient(circle at 50% 42%, #EAF5FF 0%, #CEE7FD 100%)';
-  if (s === 1) return 'radial-gradient(circle at 50% 42%, #EEF3FF 0%, #D4E0FA 100%)';
-  return 'radial-gradient(circle at 50% 42%, #E8F7FD 0%, #C7E8F9 100%)';
+  if (s === 0) return 'radial-gradient(circle at 50% 44%, #6D9EEB 0%, #3B69B5 100%)';
+  if (s === 1) return 'radial-gradient(circle at 50% 44%, #76B89A 0%, #3E785E 100%)';
+  return 'radial-gradient(circle at 50% 44%, #9582D6 0%, #554296 100%)';
 }
 
 function inferCollectionName(collectionName?: string, fallbackText?: string, alt?: string): string {
@@ -172,13 +149,7 @@ function buildImageCandidates(params: {
     list.push({ url: clean, isTransparentModel });
   };
 
-  const col = (params.collectionName || '').trim();
-  const cleanShort = (params.shortName || col).toLowerCase().replace(/[^a-z0-9]/g, '');
-  const model = (params.modelName || '').trim();
-  const cleanModel = model.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-  // If primary src is already a reliable non-404 full card (Portals/Fragment/TonAPI), use it first;
-  // for guaranteed exact model PNGs, put Changes.tg right behind it so 404 instantly recovers!
+  // 1. Always try the real original marketplace card first (Portals / Fragment / Getgems / on-chain Tonnel & MRKT)
   if (params.src) {
     const isCdnModel =
       params.src.includes('cdn.changes.tg/gifts/models/') ||
@@ -186,7 +157,12 @@ function buildImageCandidates(params: {
     add(params.src, isCdnModel);
   }
 
-  // 1. Exact model PNG on official Changes.tg Telegram Gifts CDN (200 OK for 100% of models!)
+  const col = (params.collectionName || '').trim();
+  const cleanShort = (params.shortName || col).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const model = (params.modelName || '').trim();
+  const cleanModel = model.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  // 2. Exact model PNG on official Changes.tg CDN (200 OK for 100% of models — rendered over real backdrop + symbol pattern!)
   if (col && model) {
     add(
       `https://cdn.changes.tg/gifts/models/${encodeURIComponent(col)}/png/${encodeURIComponent(model)}.png`,
@@ -194,7 +170,7 @@ function buildImageCandidates(params: {
     );
   }
 
-  // 2. Exact model PNG on Portals CDN
+  // 3. Exact model PNG on Portals CDN
   if (cleanShort && cleanModel) {
     add(
       `https://storage.portal-market.com/portals-market/gifts/${cleanShort}/models/png/${cleanModel}.png`,
@@ -202,7 +178,7 @@ function buildImageCandidates(params: {
     );
   }
 
-  // 3. Collection Original PNG on Changes.tg CDN (guaranteed 200 OK!)
+  // 4. Collection Original PNG on Changes.tg CDN (guaranteed 200 OK!)
   if (col) {
     add(
       `https://cdn.changes.tg/gifts/models/${encodeURIComponent(col)}/png/Original.png`,
@@ -210,7 +186,7 @@ function buildImageCandidates(params: {
     );
   }
 
-  // 4. Collection Original PNG on Portals CDN
+  // 5. Collection Original PNG on Portals CDN
   if (cleanShort) {
     add(
       `https://storage.portal-market.com/portals-market/gifts/${cleanShort}/models/png/original.png`,
@@ -230,17 +206,12 @@ export const NftImage: React.FC<NftImageProps> = ({
   shortName,
   modelName,
   backdropName,
-  animate = true,
+  symbolName,
 }) => {
   const resolvedCol = useMemo(
     () => inferCollectionName(collectionName, fallbackText, alt),
     [collectionName, fallbackText, alt],
   );
-
-  const lottieUrl = useMemo(() => {
-    if (!animate || !resolvedCol || !modelName) return '';
-    return `https://cdn.changes.tg/gifts/models/${encodeURIComponent(resolvedCol)}/lottie/${encodeURIComponent(modelName.trim())}.json`;
-  }, [animate, resolvedCol, modelName]);
 
   const candidates = useMemo(
     () =>
@@ -253,131 +224,24 @@ export const NftImage: React.FC<NftImageProps> = ({
     [src, resolvedCol, shortName, modelName],
   );
 
-  const [attemptIdx, setAttemptIdx] = useState(0);
-  const [inView, setInView] = useState(false);
-  const [lottieReady, setLottieReady] = useState(false);
+  const patternUrl = useMemo(() => {
+    if (!resolvedCol || !symbolName) return '';
+    return `https://cdn.changes.tg/gifts/patterns/${encodeURIComponent(resolvedCol)}/png/${encodeURIComponent(symbolName.trim())}.png`;
+  }, [resolvedCol, symbolName]);
 
-  const wrapperRef = useRef<HTMLDivElement | null>(null);
-  const lottieHostRef = useRef<HTMLDivElement | null>(null);
-  const animRef = useRef<AnimationItem | null>(null);
+  const [attemptIdx, setAttemptIdx] = useState(0);
+  const [patternBroken, setPatternBroken] = useState(false);
 
   useEffect(() => {
     setAttemptIdx(0);
-    setLottieReady(false);
-  }, [src, resolvedCol, modelName, shortName]);
-
-  // Only animate cards currently visible in viewport (smooth 60fps on iPhone)
-  useEffect(() => {
-    const node = wrapperRef.current;
-    if (!node || !lottieUrl) return;
-    if (typeof IntersectionObserver === 'undefined') {
-      setInView(true);
-      return;
-    }
-    const obs = new IntersectionObserver(
-      (entries) => {
-        const visible = entries.some((e) => e.isIntersecting);
-        setInView(visible);
-        if (animRef.current) {
-          if (visible) animRef.current.play();
-          else animRef.current.pause();
-        }
-      },
-      { rootMargin: '120px 0px', threshold: 0.01 },
-    );
-    obs.observe(node);
-    return () => obs.disconnect();
-  }, [lottieUrl]);
-
-  // Load & mount real Telegram Gift Lottie animation when visible
-  useEffect(() => {
-    if (!lottieUrl || !inView) return;
-    let cancelled = false;
-
-    fetchLottieJson(lottieUrl).then((data) => {
-      if (cancelled || !data || !lottieHostRef.current) return;
-      if (animRef.current) {
-        animRef.current.destroy();
-        animRef.current = null;
-      }
-      try {
-        // Clone data so lottie-web never mutates cached object across cards
-        const cloned = JSON.parse(JSON.stringify(data));
-        const anim = lottie.loadAnimation({
-          container: lottieHostRef.current,
-          renderer: 'svg',
-          loop: true,
-          autoplay: true,
-          animationData: cloned,
-          rendererSettings: {
-            preserveAspectRatio: 'xMidYMid meet',
-            progressiveLoad: true,
-          },
-        });
-        animRef.current = anim;
-        setLottieReady(true);
-      } catch {
-        setLottieReady(false);
-      }
-    });
-
-    return () => {
-      cancelled = true;
-      if (animRef.current) {
-        animRef.current.destroy();
-        animRef.current = null;
-      }
-    };
-  }, [lottieUrl, inView]);
+    setPatternBroken(false);
+  }, [src, resolvedCol, modelName, shortName, symbolName]);
 
   const current = candidates[attemptIdx];
   const backdropBg = useMemo(
     () => resolveBackdropGradient(backdropName, resolvedCol),
     [backdropName, resolvedCol],
   );
-
-  // Full animated Telegram-profile style card (radial official backdrop + live 60fps Lottie!)
-  if (lottieUrl) {
-    return (
-      <div
-        ref={wrapperRef}
-        className="relative w-full h-full flex items-center justify-center overflow-hidden"
-        style={{ background: backdropBg }}
-      >
-        {/* Subtle radial highlight matching Telegram profile gift card */}
-        <div
-          className="pointer-events-none absolute inset-0 opacity-30"
-          style={{
-            background:
-              'radial-gradient(circle at 50% 35%, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0) 65%)',
-          }}
-        />
-
-        {/* Instant PNG poster while Lottie JSON loads (zero flash, zero broken icon!) */}
-        {!lottieReady && current && (
-          <img
-            src={current.url}
-            alt={alt}
-            loading="lazy"
-            onError={() => setAttemptIdx((idx) => idx + 1)}
-            className={
-              current.isTransparentModel
-                ? 'relative z-10 w-[82%] h-[82%] object-contain drop-shadow-[0_6px_12px_rgba(0,0,0,0.22)]'
-                : `relative z-10 ${className}`
-            }
-          />
-        )}
-
-        {/* Live 60fps Telegram Gift Lottie Animation */}
-        <div
-          ref={lottieHostRef}
-          className={`relative z-10 w-[84%] h-[84%] flex items-center justify-center drop-shadow-[0_6px_14px_rgba(0,0,0,0.22)] transition-opacity duration-200 ${
-            lottieReady ? 'opacity-100' : 'opacity-0 absolute inset-0 m-auto pointer-events-none'
-          }`}
-        />
-      </div>
-    );
-  }
 
   if (!current) {
     return (
@@ -394,23 +258,52 @@ export const NftImage: React.FC<NftImageProps> = ({
     );
   }
 
+  // Authentic 3-layer Telegram Gift card composite for off-chain gifts (Backdrop + Official Symbol Pattern + Model PNG)
   if (current.isTransparentModel) {
     return (
       <div
-        className="w-full h-full flex items-center justify-center p-2.5 overflow-hidden"
+        className="relative w-full h-full flex items-center justify-center overflow-hidden"
         style={{ background: backdropBg }}
       >
+        {/* Official Telegram background symbol pattern layer */}
+        {patternUrl && !patternBroken && (
+          <div className="pointer-events-none absolute inset-0 overflow-hidden">
+            {PATTERN_SPOTS.map((spot, idx) => (
+              <img
+                key={idx}
+                src={patternUrl}
+                alt=""
+                aria-hidden="true"
+                loading="lazy"
+                onError={() => setPatternBroken(true)}
+                className="absolute object-contain select-none"
+                style={{
+                  top: spot.top,
+                  left: spot.left,
+                  width: spot.size,
+                  height: spot.size,
+                  opacity: spot.opacity,
+                  transform: `rotate(${spot.rot}deg)`,
+                  filter: 'brightness(0.25) contrast(1.2)',
+                }}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Centered crisp model PNG */}
         <img
           src={current.url}
           alt={alt}
           loading="lazy"
           onError={() => setAttemptIdx((idx) => idx + 1)}
-          className="w-full h-full object-contain drop-shadow-[0_6px_12px_rgba(0,0,0,0.22)] transition-transform duration-300 group-hover:scale-[1.04]"
+          className="relative z-10 w-[72%] h-[72%] object-contain drop-shadow-[0_6px_14px_rgba(0,0,0,0.24)] transition-transform duration-300 group-hover:scale-[1.04]"
         />
       </div>
     );
   }
 
+  // Real original full marketplace card (Portals / Fragment / Getgems / on-chain Tonnel & MRKT)
   return (
     <img
       src={current.url}

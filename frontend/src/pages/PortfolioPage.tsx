@@ -176,6 +176,7 @@ export const PortfolioPage: React.FC<PortfolioPageProps> = ({
                       shortName={item.short_name}
                       modelName={item.listing?.attributes?.find((a) => a.type === 'model')?.value}
                       backdropName={item.listing?.attributes?.find((a) => a.type === 'backdrop')?.value}
+                      symbolName={item.listing?.attributes?.find((a) => a.type === 'symbol')?.value}
                       className="w-full h-full object-cover"
                     />
                   </div>

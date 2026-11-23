@@ -14,6 +14,7 @@ export const NftCard: React.FC<NftCardProps> = ({ item, tonUsd, onSelect }) => {
   const marketMeta = getMarketMeta(item.market);
   const modelAttr = item.attributes?.find((a) => a.type === 'model');
   const backdropAttr = item.attributes?.find((a) => a.type === 'backdrop');
+  const symbolAttr = item.attributes?.find((a) => a.type === 'symbol');
   const isProfitable = item.net_profit_ton >= 0;
 
   return (
@@ -35,6 +36,7 @@ export const NftCard: React.FC<NftCardProps> = ({ item, tonUsd, onSelect }) => {
           shortName={item.short_name}
           modelName={modelAttr?.value}
           backdropName={backdropAttr?.value}
+          symbolName={symbolAttr?.value}
           className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300"
         />
 
