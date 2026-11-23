@@ -57,12 +57,15 @@ function getMarketCollectionUrl(
     return `https://getgems.io/search?q=${query}`;
   }
   if (m === 'mrkt') {
-    return 'https://t.me/mrkt';
+    return 'https://t.me/mrkt/app';
   }
   if (m === 'tonnel') {
-    return 'https://t.me/tonnel_network_bot';
+    return 'https://t.me/tonnel_network_bot/gift';
   }
-  return 'https://portal-market.com';
+  if (m === 'fragment') {
+    return `https://fragment.com/gifts?query=${query}`;
+  }
+  return 'https://t.me/portals_market_bot/market';
 }
 
 export const SniperPage: React.FC<SniperPageProps> = ({
@@ -598,6 +601,8 @@ export const SniperPage: React.FC<SniperPageProps> = ({
                             <NftImage
                               src={offer.photo_url}
                               alt={offer.collection_name}
+                              collectionName={offer.collection_name}
+                              shortName={offer.collection_short_name}
                               className="w-full h-full object-cover"
                             />
                           </div>
@@ -719,6 +724,11 @@ export const SniperPage: React.FC<SniperPageProps> = ({
                         <NftImage
                           src={item.photo_url || item.sample_listing?.photo_url}
                           alt={item.collection_name}
+                          collectionName={item.collection_name}
+                          shortName={shortName}
+                          modelName={item.sample_listing?.attributes?.find((a) => a.type === 'model')?.value}
+                          backdropName={item.sample_listing?.attributes?.find((a) => a.type === 'backdrop')?.value}
+                          symbolName={item.sample_listing?.attributes?.find((a) => a.type === 'symbol')?.value}
                           className="w-full h-full object-cover"
                         />
                       </div>
@@ -814,6 +824,11 @@ export const SniperPage: React.FC<SniperPageProps> = ({
                       <NftImage
                         src={previewListing.photo_url}
                         alt={previewListing.collection_name}
+                        collectionName={previewListing.collection_name}
+                        shortName={previewListing.short_name}
+                        modelName={previewListing.attributes?.find((a) => a.type === 'model')?.value}
+                        backdropName={previewListing.attributes?.find((a) => a.type === 'backdrop')?.value}
+                        symbolName={previewListing.attributes?.find((a) => a.type === 'symbol')?.value}
                         className="w-full h-full object-cover"
                       />
                       <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-xl bg-[#0098EA] text-white text-[11px] font-extrabold shadow-sm tabular-nums">
@@ -964,6 +979,11 @@ export const SniperPage: React.FC<SniperPageProps> = ({
                           <NftImage
                             src={lst?.photo_url}
                             alt={titleText}
+                            collectionName={lst?.collection_name}
+                            shortName={lst?.short_name}
+                            modelName={lst?.attributes?.find((a) => a.type === 'model')?.value}
+                            backdropName={lst?.attributes?.find((a) => a.type === 'backdrop')?.value}
+                            symbolName={lst?.attributes?.find((a) => a.type === 'symbol')?.value}
                             className="w-full h-full object-cover"
                           />
                         </div>

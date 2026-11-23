@@ -260,7 +260,7 @@ class TonnelClient:
             "attributes": attributes,
             "listed_at": utc_now_iso(),
             "market": "tonnel",
-            "market_url": f"https://t.me/tonnel_network_bot/gifts?startapp=gift_{gift_id}",
+            "market_url": f"https://t.me/tonnel_network_bot/gift?startapp={gift_id}",
         }
 
 

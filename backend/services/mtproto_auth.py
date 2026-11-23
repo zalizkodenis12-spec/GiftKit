@@ -286,7 +286,7 @@ class MtprotoAuthService:
             try:
                 init_data = await self._fetch_bot_init_data(
                     "tonnel_network_bot",
-                    "gifts",
+                    "gift",
                     "https://market.tonnel.network",
                 )
                 if init_data:

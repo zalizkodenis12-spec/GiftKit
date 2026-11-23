@@ -361,6 +361,7 @@ export const ScannerPage: React.FC<ScannerPageProps> = ({
                         shortName={opp.short_name}
                         modelName={opp.model_name || opp.listing?.attributes?.find((a) => a.type === 'model')?.value}
                         backdropName={opp.listing?.attributes?.find((a) => a.type === 'backdrop')?.value}
+                        symbolName={opp.listing?.attributes?.find((a) => a.type === 'symbol')?.value}
                         className="w-full h-full object-cover"
                       />
                     </div>

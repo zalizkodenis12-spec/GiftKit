@@ -155,6 +155,11 @@ function buildImageCandidates(params: {
       params.src.includes('cdn.changes.tg/gifts/models/') ||
       params.src.includes('/models/png/');
     add(params.src, isCdnModel);
+
+    // If Fragment .large.jpg fails transiently or isn't generated, try .webp too
+    if (params.src.includes('nft.fragment.com/gift/') && params.src.endsWith('.large.jpg')) {
+      add(params.src.replace(/\.large\.jpg$/, '.webp'), false);
+    }
   }
 
   const col = (params.collectionName || '').trim();
@@ -230,12 +235,23 @@ export const NftImage: React.FC<NftImageProps> = ({
   }, [resolvedCol, symbolName]);
 
   const [attemptIdx, setAttemptIdx] = useState(0);
-  const [patternBroken, setPatternBroken] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
     setAttemptIdx(0);
-    setPatternBroken(false);
+    setRetryCount(0);
   }, [src, resolvedCol, modelName, shortName, symbolName]);
+
+  // If a transient burst-load hiccup exhausts all candidates in the feed, retry once automatically
+  useEffect(() => {
+    if (attemptIdx < candidates.length || candidates.length === 0 || retryCount >= 1) return;
+    const timer = window.setTimeout(() => {
+      const firstCdnIdx = candidates.findIndex((c) => c.isTransparentModel);
+      setRetryCount((r) => r + 1);
+      setAttemptIdx(firstCdnIdx >= 0 ? firstCdnIdx : 0);
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [attemptIdx, candidates, retryCount]);
 
   const current = candidates[attemptIdx];
   const backdropBg = useMemo(
@@ -258,6 +274,10 @@ export const NftImage: React.FC<NftImageProps> = ({
     );
   }
 
+  const handleImageError = () => {
+    setAttemptIdx((idx) => (idx < candidates.length ? idx + 1 : idx));
+  };
+
   // Authentic 3-layer Telegram Gift card composite for off-chain gifts (Backdrop + Official Symbol Pattern + Model PNG)
   if (current.isTransparentModel) {
     return (
@@ -265,18 +285,13 @@ export const NftImage: React.FC<NftImageProps> = ({
         className="relative w-full h-full flex items-center justify-center overflow-hidden"
         style={{ background: backdropBg }}
       >
-        {/* Official Telegram background symbol pattern layer */}
-        {patternUrl && !patternBroken && (
-          <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        {/* Official Telegram background symbol pattern layer — single cached CSS mask, zero extra <img> stalls */}
+        {patternUrl && (
+          <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden="true">
             {PATTERN_SPOTS.map((spot, idx) => (
-              <img
+              <span
                 key={idx}
-                src={patternUrl}
-                alt=""
-                aria-hidden="true"
-                loading="lazy"
-                onError={() => setPatternBroken(true)}
-                className="absolute object-contain select-none"
+                className="absolute block select-none"
                 style={{
                   top: spot.top,
                   left: spot.left,
@@ -284,19 +299,29 @@ export const NftImage: React.FC<NftImageProps> = ({
                   height: spot.size,
                   opacity: spot.opacity,
                   transform: `rotate(${spot.rot}deg)`,
-                  filter: 'brightness(0.25) contrast(1.2)',
+                  backgroundColor: 'rgba(11, 17, 32, 0.72)',
+                  WebkitMaskImage: `url("${patternUrl}")`,
+                  maskImage: `url("${patternUrl}")`,
+                  WebkitMaskSize: 'contain',
+                  maskSize: 'contain',
+                  WebkitMaskRepeat: 'no-repeat',
+                  maskRepeat: 'no-repeat',
+                  WebkitMaskPosition: 'center',
+                  maskPosition: 'center',
                 }}
               />
             ))}
           </div>
         )}
 
-        {/* Centered crisp model PNG */}
+        {/* Centered crisp model PNG — keyed by URL and eager on fallback so WebKit never stalls */}
         <img
+          key={`${attemptIdx}-${retryCount}-${current.url}`}
           src={current.url}
           alt={alt}
-          loading="lazy"
-          onError={() => setAttemptIdx((idx) => idx + 1)}
+          loading="eager"
+          decoding="async"
+          onError={handleImageError}
           className="relative z-10 w-[72%] h-[72%] object-contain drop-shadow-[0_6px_14px_rgba(0,0,0,0.24)] transition-transform duration-300 group-hover:scale-[1.04]"
         />
       </div>
@@ -306,10 +331,12 @@ export const NftImage: React.FC<NftImageProps> = ({
   // Real original full marketplace card (Portals / Fragment / Getgems / on-chain Tonnel & MRKT)
   return (
     <img
+      key={`${attemptIdx}-${retryCount}-${current.url}`}
       src={current.url}
       alt={alt}
-      loading="lazy"
-      onError={() => setAttemptIdx((idx) => idx + 1)}
+      loading={attemptIdx > 0 ? 'eager' : 'lazy'}
+      decoding="async"
+      onError={handleImageError}
       className={className}
     />
   );

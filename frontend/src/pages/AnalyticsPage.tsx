@@ -321,6 +321,11 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                   <NftImage
                     src={inspectedGift.photo_url}
                     alt={inspectedGift.collection_name}
+                    collectionName={inspectedGift.collection_name}
+                    shortName={inspectedGift.short_name}
+                    modelName={inspectedGift.attributes?.find((a) => a.type === 'model')?.value}
+                    backdropName={inspectedGift.attributes?.find((a) => a.type === 'backdrop')?.value}
+                    symbolName={inspectedGift.attributes?.find((a) => a.type === 'symbol')?.value}
                     className="w-full h-full object-cover"
                   />
                 </div>
@@ -704,6 +709,8 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                             <NftImage
                               src={c.photo_url}
                               alt={c.name}
+                              collectionName={c.name}
+                              shortName={c.short_name}
                               className="w-full h-full object-contain"
                             />
                           </div>
@@ -1028,6 +1035,8 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                       <NftImage
                         src={col.photo_url}
                         alt={col.name}
+                        collectionName={col.name}
+                        shortName={col.short_name}
                         className="w-full h-full object-cover"
                       />
                     </div>
@@ -1117,6 +1126,7 @@ export const AnalyticsPage: React.FC<AnalyticsPageProps> = ({
                       <NftImage
                         src={ev.photo_url}
                         alt={ev.collection_name}
+                        collectionName={ev.collection_name}
                         className="w-full h-full object-cover"
                       />
                     </div>

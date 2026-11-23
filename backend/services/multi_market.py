@@ -174,9 +174,9 @@ class MultiMarketAggregator:
         # 4. Tonnel (LIVE if initData provided, else live-anchored with is_live=False)
         tonnel_id = item_id[7:] if item_id.startswith("tonnel-") else ""
         tonnel_url = (
-            f"https://t.me/tonnel_network_bot/gifts?startapp=gift_{tonnel_id}"
+            f"https://t.me/tonnel_network_bot/gift?startapp={tonnel_id}"
             if tonnel_id
-            else "https://t.me/tonnel_network_bot/gifts"
+            else "https://t.me/tonnel_network_bot/gift"
         )
         tonnel_live = await self._try_tonnel_live_floor(short)
         if tonnel_live and tonnel_live > 0:
