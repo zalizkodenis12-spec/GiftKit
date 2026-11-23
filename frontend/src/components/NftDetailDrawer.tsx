@@ -3,6 +3,7 @@ import {
   Briefcase,
   Calculator,
   CheckCircle2,
+  Copy,
   ExternalLink,
   Eye,
   Flame,
@@ -42,6 +43,7 @@ interface NftDetailDrawerProps {
   onBuy: (item: AnalyzedListing) => Promise<void>;
   onMakeOffer: (item: AnalyzedListing) => Promise<void>;
   onAddPortfolio: (item: AnalyzedListing) => Promise<void>;
+  onFindTwins?: (item: AnalyzedListing) => void;
   onNotify?: (
     title: string,
     message?: string,
@@ -66,6 +68,7 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
   onBuy,
   onMakeOffer,
   onAddPortfolio,
+  onFindTwins,
   onNotify,
 }) => {
   const [busyAction, setBusyAction] = useState<'buy' | 'offer' | 'portfolio' | null>(null);
@@ -394,25 +397,41 @@ export const NftDetailDrawer: React.FC<NftDetailDrawerProps> = ({
               </div>
             )}
 
-            {/* Deep AI Vision Check Button */}
-            <button
-              type="button"
-              disabled={visionLoading}
-              onClick={handleRunVisionScore}
-              className="w-full h-9 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-[11.5px] font-extrabold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-60"
-            >
-              {visionLoading ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#0098EA]" />
-                  <span>Аналізуємо композицію та палітру...</span>
-                </>
-              ) : (
-                <>
-                  <Eye className="w-3.5 h-3.5 text-[#0098EA]" />
-                  <span>Перевірити через AI Vision</span>
-                </>
+            {/* Deep AI Vision Check + Visual 1:1 Twins Buttons */}
+            <div className={onFindTwins ? 'grid grid-cols-2 gap-2' : ''}>
+              <button
+                type="button"
+                disabled={visionLoading}
+                onClick={handleRunVisionScore}
+                className="w-full h-9 px-2.5 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-[11px] font-extrabold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-60"
+              >
+                {visionLoading ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#0098EA] shrink-0" />
+                    <span className="truncate">Аналіз...</span>
+                  </>
+                ) : (
+                  <>
+                    <Eye className="w-3.5 h-3.5 text-[#0098EA] shrink-0" />
+                    <span className="truncate">AI Vision</span>
+                  </>
+                )}
+              </button>
+
+              {onFindTwins && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    haptic('light');
+                    onFindTwins(item);
+                  }}
+                  className="w-full h-9 px-2.5 rounded-xl bg-white hover:bg-[#E8F5FE] border border-[#BAE3FC] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-extrabold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                >
+                  <Copy className="w-3.5 h-3.5 text-[#0098EA] shrink-0" />
+                  <span className="truncate">Двійники 1:1</span>
+                </button>
               )}
-            </button>
+            </div>
           </div>
 
           {/* X-Ray Recommendation */}

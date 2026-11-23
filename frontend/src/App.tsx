@@ -53,6 +53,14 @@ export const App: React.FC = () => {
 
   const [refreshTick, setRefreshTick] = useState(0);
   const [focusXRayTrigger, setFocusXRayTrigger] = useState(0);
+  const [twinsSeed, setTwinsSeed] = useState<{
+    query: string;
+    collection?: string;
+    model?: string;
+    backdrop?: string;
+    symbol?: string;
+    nonce: number;
+  } | null>(null);
 
   // Selected listing drawer state
   const [drawerItem, setDrawerItem] = useState<AnalyzedListing | null>(null);
@@ -474,7 +482,9 @@ export const App: React.FC = () => {
         {activeTab === 'sniper' && (
           <SniperPage
             collections={collections}
+            tonUsd={tonUsd}
             refreshTick={refreshTick}
+            initialTwinsSeed={twinsSeed}
             onSelectListing={openListingDrawer}
             onNotify={notify}
           />
@@ -527,6 +537,22 @@ export const App: React.FC = () => {
         onBuy={handleBuyListing}
         onMakeOffer={handleMakeOffer}
         onAddPortfolio={handleAddToPortfolio}
+        onFindTwins={(nft) => {
+          const model = nft.attributes?.find((a) => a.type === 'model')?.value;
+          const backdrop = nft.attributes?.find((a) => a.type === 'backdrop')?.value;
+          const symbol = nft.attributes?.find((a) => a.type === 'symbol')?.value;
+          const q = nft.number > 0 ? `${nft.collection_name} #${nft.number}` : nft.collection_name;
+          setDrawerItem(null);
+          setTwinsSeed({
+            query: q,
+            collection: nft.short_name || nft.collection_name,
+            model,
+            backdrop,
+            symbol,
+            nonce: Date.now(),
+          });
+          setActiveTab('sniper');
+        }}
         onNotify={notify}
       />
     </div>

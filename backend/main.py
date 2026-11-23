@@ -803,6 +803,36 @@ async def get_analytics_xray(query: str = Query(..., min_length=1)) -> dict[str,
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.get("/api/twins/search")
+async def search_visual_twins_endpoint(
+    query: str = Query(default=""),
+    collection: str = Query(default=""),
+    model: str = Query(default=""),
+    backdrop: str = Query(default=""),
+    symbol: str = Query(default=""),
+    sort: str = Query(default="similarity"),
+    limit: int = Query(default=48, ge=1, le=80),
+) -> dict[str, Any]:
+    """Find 1:1 visual twins across Portals, MRKT, Tonnel, Getgems & Fragment."""
+    from backend.services.twins_engine import search_visual_twins
+
+    if not any([query.strip(), collection.strip(), model.strip()]):
+        raise HTTPException(status_code=400, detail="Введіть назву, посилання або номер подарунка")
+    try:
+        return await search_visual_twins(
+            analytics_engine,
+            query=query,
+            collection_hint=collection,
+            model_hint=model,
+            backdrop_hint=backdrop,
+            symbol_hint=symbol,
+            sort=sort,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/api/analytics/whales")
 async def get_analytics_whales(limit: int = Query(default=12, ge=1, le=30)) -> dict[str, Any]:
     events = await analytics_engine.get_whale_events(limit=limit)

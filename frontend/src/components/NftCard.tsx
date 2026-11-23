@@ -48,6 +48,13 @@ export const NftCard: React.FC<NftCardProps> = ({ item, tonUsd, onSelect }) => {
           {marketMeta.label}
         </span>
 
+        {/* Optional Top-Right 1:1 Visual Similarity Pill (shown in Visual Twins mode) */}
+        {typeof item.similarity_percent === 'number' && (
+          <span className="absolute top-2 right-2 px-2 py-0.5 rounded-lg text-[10px] font-extrabold tabular-nums bg-[#0098EA] text-white shadow-xs">
+            {item.similarity_percent}%
+          </span>
+        )}
+
         {/* Bottom-Left Number Pill */}
         <span className="absolute bottom-2 left-2 px-2 py-0.5 rounded-lg text-[10px] font-bold tabular-nums bg-white/94 text-[#0B1120] border border-[#E2E8F0] backdrop-blur-md">
           #{item.number}

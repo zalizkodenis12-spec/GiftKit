@@ -1,48 +1,74 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Bell,
+  Copy,
   Crosshair,
-  Eye,
   ExternalLink,
+  Loader2,
   Plus,
   RefreshCw,
-  Send,
-  ShoppingCart,
+  Search,
   Sparkles,
   Trash2,
+  TrendingUp,
   X,
   Zap,
 } from 'lucide-react';
 import { api } from '../api/client';
 import type {
-  AlertLog,
   AnalyzedListing,
   CollectionSummary,
   CreateSniperRulePayload,
   OfferRadarItem,
   SniperRule,
-  TestAlertResponse,
   UserOffer,
+  VisualTwinsResponse,
 } from '../types/api';
 import {
-  formatTimeAgo,
   formatTon,
   getMarketMeta,
   haptic,
   openExternalLink,
 } from '../utils/format';
+import { NftCard } from '../components/NftCard';
 import { NftImage } from '../components/NftImage';
+
+export interface TwinsSeed {
+  query: string;
+  collection?: string;
+  model?: string;
+  backdrop?: string;
+  symbol?: string;
+  nonce: number;
+}
 
 interface SniperPageProps {
   collections: CollectionSummary[];
+  tonUsd: number;
   refreshTick: number;
+  initialTwinsSeed?: TwinsSeed | null;
   onSelectListing: (item: AnalyzedListing) => void;
   onNotify: (title: string, message?: string, variant?: 'info' | 'success' | 'warning' | 'error') => void;
 }
 
-type SubTab = 'rules' | 'offers' | 'alerts';
+type SubTab = 'rules' | 'offers' | 'twins';
+type TwinsSort = 'similarity' | 'price_asc' | 'discount_desc';
 
 const ALL_MARKETS = ['portals', 'getgems', 'mrkt', 'tonnel'];
+const TWINS_MARKETS = [
+  { key: 'all', label: 'Всі' },
+  { key: 'portals', label: 'Portals' },
+  { key: 'mrkt', label: 'MRKT' },
+  { key: 'tonnel', label: 'Tonnel' },
+  { key: 'getgems', label: 'Getgems' },
+  { key: 'fragment', label: 'Fragment' },
+];
+const QUICK_TWINS_EXAMPLES = [
+  'Eternal Rose #3497',
+  'Plush Pepe',
+  'Homemade Cake Sweet Bite',
+  'B-Day Candle Neon Lights',
+];
 
 function getMarketCollectionUrl(
   market?: string,
@@ -70,23 +96,35 @@ function getMarketCollectionUrl(
 
 export const SniperPage: React.FC<SniperPageProps> = ({
   collections,
+  tonUsd,
   refreshTick,
+  initialTwinsSeed,
   onSelectListing,
   onNotify,
 }) => {
-  const [subTab, setSubTab] = useState<SubTab>('rules');
+  const [subTab, setSubTab] = useState<SubTab>(() => (initialTwinsSeed ? 'twins' : 'rules'));
 
   // Data
   const [rules, setRules] = useState<SniperRule[]>([]);
   const [offers, setOffers] = useState<UserOffer[]>([]);
   const [radar, setRadar] = useState<OfferRadarItem[]>([]);
-  const [alerts, setAlerts] = useState<AlertLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshingRadar, setRefreshingRadar] = useState(false);
 
-  // Test TG Preview
-  const [testingAlert, setTestingAlert] = useState(false);
-  const [tgPreview, setTgPreview] = useState<TestAlertResponse | null>(null);
+  // Visual 1:1 Twins Finder
+  const [twinsQuery, setTwinsQuery] = useState<string>('');
+  const [twinsSort, setTwinsSort] = useState<TwinsSort>('similarity');
+  const [twinsMarket, setTwinsMarket] = useState<string>('all');
+  const [twinsLoading, setTwinsLoading] = useState<boolean>(false);
+  const [twinsError, setTwinsError] = useState<string>('');
+  const [twinsResult, setTwinsResult] = useState<VisualTwinsResponse | null>(null);
+  const [lastTwinsParams, setLastTwinsParams] = useState<{
+    query?: string;
+    collection?: string;
+    model?: string;
+    backdrop?: string;
+    symbol?: string;
+  } | null>(null);
 
   // Create Rule Modal
   const [showRuleModal, setShowRuleModal] = useState(false);
@@ -116,19 +154,76 @@ export const SniperPage: React.FC<SniperPageProps> = ({
   const loadAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [rulesRes, offersRes, alertsRes] = await Promise.all([
+      const [rulesRes, offersRes] = await Promise.all([
         api.getSniperRules().catch(() => ({ rules: [] })),
         api.getOffers().catch(() => ({ offers: [], radar: [] })),
-        api.getSniperAlerts().catch(() => ({ alerts: [] })),
       ]);
       setRules(rulesRes.rules || []);
       setOffers(offersRes.offers || []);
       setRadar(offersRes.radar || []);
-      setAlerts(alertsRes.alerts || []);
     } finally {
       setLoading(false);
     }
   }, []);
+
+  const runTwinsSearch = useCallback(
+    async (
+      params: {
+        query?: string;
+        collection?: string;
+        model?: string;
+        backdrop?: string;
+        symbol?: string;
+      },
+      sortOverride?: TwinsSort,
+    ) => {
+      const q = (params.query || '').trim();
+      if (!q && !params.collection && !params.model) {
+        onNotify('Введіть подарунок для пошуку', 'Посилання, назва + номер або модель', 'warning');
+        return;
+      }
+      setTwinsLoading(true);
+      setTwinsError('');
+      setLastTwinsParams(params);
+      try {
+        const res = await api.searchVisualTwins({
+          ...params,
+          query: q,
+          sort: sortOverride || twinsSort,
+          limit: 60,
+        });
+        setTwinsResult(res);
+        setTwinsMarket('all');
+      } catch (err) {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : 'Не вдалося знайти подарунок або двійників. Спробуйте інший запит.';
+        setTwinsError(msg);
+        setTwinsResult(null);
+      } finally {
+        setTwinsLoading(false);
+      }
+    },
+    [onNotify, twinsSort],
+  );
+
+  useEffect(() => {
+    if (!initialTwinsSeed) return;
+    setSubTab('twins');
+    setTwinsQuery(initialTwinsSeed.query);
+    runTwinsSearch(
+      {
+        query: initialTwinsSeed.query,
+        collection: initialTwinsSeed.collection,
+        model: initialTwinsSeed.model,
+        backdrop: initialTwinsSeed.backdrop,
+        symbol: initialTwinsSeed.symbol,
+      },
+      'similarity',
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialTwinsSeed?.nonce]);
 
   useEffect(() => {
     loadAll();
@@ -261,24 +356,6 @@ export const SniperPage: React.FC<SniperPageProps> = ({
     }
   };
 
-  const handleSelectAlertCard = async (al: AlertLog) => {
-    haptic('light');
-    if (al.listing) {
-      onSelectListing(al.listing);
-      return;
-    }
-    const query = al.listing_id || al.title || al.rule_name;
-    if (!query) return;
-    try {
-      const res = await api.runXRay(String(query));
-      if (res?.item) {
-        onSelectListing(res.item);
-      }
-    } catch {
-      onNotify('Не вдалося відкрити NFT', String(query), 'warning');
-    }
-  };
-
   const openOfferModal = (item: OfferRadarItem) => {
     haptic('light');
     const suggestedBid =
@@ -349,33 +426,26 @@ export const SniperPage: React.FC<SniperPageProps> = ({
     }
   };
 
-  const handleTestAlert = async () => {
-    haptic('medium');
-    setTestingAlert(true);
-    try {
-      const res = await api.triggerTestAlert();
-      setTgPreview(res);
-      await loadAll();
-      const sent = res.sent_to_telegram ?? res.telegram_sent;
-      onNotify(
-        sent ? 'Тест-картку надіслано в Telegram!' : 'Прев’ю ТГ-картки згенеровано',
-        sent
-          ? 'Перевірте ваш чат з ботом'
-          : 'Додайте TG_BOT_TOKEN у вкладці «Маркети» для реальної відправки',
-        sent ? 'success' : 'info',
+  const filteredTwins = useMemo(() => {
+    const list = twinsResult?.items || [];
+    const byMarket =
+      twinsMarket === 'all'
+        ? list
+        : list.filter((it) => (it.market || '').toLowerCase() === twinsMarket);
+    const copy = [...byMarket];
+    if (twinsSort === 'price_asc') {
+      copy.sort((a, b) => a.price - b.price || (b.similarity_percent ?? 0) - (a.similarity_percent ?? 0));
+    } else if (twinsSort === 'discount_desc') {
+      copy.sort(
+        (a, b) =>
+          b.discount_percent - a.discount_percent ||
+          (b.similarity_percent ?? 0) - (a.similarity_percent ?? 0),
       );
-    } catch (err) {
-      onNotify('Помилка тест-алерту', err instanceof Error ? err.message : '', 'error');
-    } finally {
-      setTestingAlert(false);
+    } else {
+      copy.sort((a, b) => (b.similarity_percent ?? 0) - (a.similarity_percent ?? 0) || a.price - b.price);
     }
-  };
-
-  const rawPreview = tgPreview?.listing || tgPreview?.alert?.listing || alerts[0]?.listing;
-  const previewListing =
-    rawPreview && typeof rawPreview.price === 'number' && rawPreview.collection_name
-      ? rawPreview
-      : null;
+    return copy;
+  }, [twinsResult, twinsMarket, twinsSort]);
 
   return (
     <div className="space-y-4 pb-4">
@@ -385,7 +455,7 @@ export const SniperPage: React.FC<SniperPageProps> = ({
           [
             ['rules', 'Правила', rules.filter((r) => r.enabled).length, Crosshair],
             ['offers', 'Офери', offers.length, Zap],
-            ['alerts', 'Алерти', alerts.length, Bell],
+            ['twins', 'Двійники', twinsResult?.total ?? 0, Copy],
           ] as const
         ).map(([key, label, count, Icon]) => {
           const active = subTab === key;
@@ -781,318 +851,327 @@ export const SniperPage: React.FC<SniperPageProps> = ({
         </div>
       )}
 
-      {/* TAB 3: ALERT LOG & TELEGRAM CARD PREVIEW */}
-      {subTab === 'alerts' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
-          {/* Left: Test Alert + Telegram Preview */}
-          <div className="lg:col-span-5 space-y-3">
-            <div className="ton-card rounded-2xl p-3.5 bg-gradient-to-br from-white to-[#F0F8FF] border-[#BAE3FC] flex items-center justify-between gap-3">
-              <div>
-                <h2 className="font-display text-[13.5px] font-extrabold text-[#0B1120]">
-                  Прев&apos;ю картки в Telegram
-                </h2>
-                <p className="text-[11px] text-[#334155] mt-0.5">
-                  Перевірте, як бот надсилає знахідки снайпера з фото та кнопками
-                </p>
-              </div>
-              <button
-                type="button"
-                disabled={testingAlert}
-                onClick={handleTestAlert}
-                className="ton-btn-primary h-10 px-3.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-60"
-              >
-                <Send className="w-3.5 h-3.5" />
-                <span>{testingAlert ? '...' : 'Тест ТГ-картки'}</span>
-              </button>
+      {/* TAB 3: VISUAL 1:1 TWINS FINDER (SAME CARD GRID & DRAWER AS SCANNER) */}
+      {subTab === 'twins' && (
+        <div className="space-y-3.5">
+          {/* Universal Gift Input Card */}
+          <section className="ton-card rounded-2xl p-3.5 sm:p-4 space-y-3">
+            <div>
+              <h2 className="font-display text-[15px] font-extrabold text-[#0B1120] flex items-center gap-1.5">
+                <Copy className="w-4 h-4 text-[#0098EA]" />
+                Пошук двійників 1:1 по вигляду
+              </h2>
+              <p className="text-[11.5px] text-[#64748B] mt-0.5">
+                Вставте посилання (t.me/nft/..., Fragment, Getgems), назву + номер або модель — знайдемо сам подарунок і всіх його візуальних двійників на всіх 5 маркетах
+              </p>
             </div>
 
-            {(tgPreview || previewListing) && (
-              <div className="rounded-2xl p-3 bg-[#E8F5FE] border border-[#BAE3FC] space-y-1.5">
-                <div className="flex items-center justify-between px-1">
-                  <span className="text-[10.5px] font-extrabold text-[#0077C8] flex items-center gap-1">
-                    <Send className="w-3 h-3" />
-                    Telegram Bot · GiftKit
-                  </span>
-                  <span className="text-[10px] font-semibold text-[#334155]">
-                    {tgPreview?.sent_to_telegram ? 'Надіслано в чат' : 'Живе прев’ю'}
-                  </span>
-                </div>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                haptic('light');
+                runTwinsSearch({ query: twinsQuery });
+              }}
+              className="flex items-center gap-2"
+            >
+              <div className="relative flex-1 min-w-0">
+                <Search className="w-4 h-4 text-[#64748B] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={twinsQuery}
+                  onChange={(e) => setTwinsQuery(e.target.value)}
+                  placeholder="Напр.: t.me/nft/EternalRose-3497 або Plush Pepe #123..."
+                  className="w-full h-10 pl-9 pr-8 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] focus:border-[#0098EA] focus:bg-white text-xs font-semibold text-[#0B1120] placeholder:text-[#94A3B8] focus:outline-none transition-colors"
+                />
+                {twinsQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setTwinsQuery('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#94A3B8] hover:text-[#334155] cursor-pointer"
+                    aria-label="Очистити"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              <button
+                type="submit"
+                disabled={twinsLoading}
+                className="ton-btn-primary h-10 px-4 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 shrink-0 cursor-pointer disabled:opacity-60"
+              >
+                {twinsLoading ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Пошук...</span>
+                  </>
+                ) : (
+                  <>
+                    <Search className="w-3.5 h-3.5" />
+                    <span>Знайти</span>
+                  </>
+                )}
+              </button>
+            </form>
 
-                <div className="bg-white rounded-2xl rounded-tl-md shadow-sm border border-[#BAE3FC] overflow-hidden">
-                  {previewListing && (
-                    <div className="relative h-44 w-full bg-[#F4F7FB] overflow-hidden">
-                      <NftImage
-                        src={previewListing.photo_url}
-                        alt={previewListing.collection_name}
-                        collectionName={previewListing.collection_name}
-                        shortName={previewListing.short_name}
-                        modelName={previewListing.attributes?.find((a) => a.type === 'model')?.value}
-                        backdropName={previewListing.attributes?.find((a) => a.type === 'backdrop')?.value}
-                        symbolName={previewListing.attributes?.find((a) => a.type === 'symbol')?.value}
-                        className="w-full h-full object-cover"
-                      />
-                      <span className="absolute top-2.5 left-2.5 px-2.5 py-1 rounded-xl bg-[#0098EA] text-white text-[11px] font-extrabold shadow-sm tabular-nums">
-                        -{Math.round(previewListing.discount_percent)}% · {previewListing.verdict_label}
+            {/* Quick Example Chips */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10.5px] font-bold text-[#64748B]">Приклади:</span>
+              {QUICK_TWINS_EXAMPLES.map((ex) => (
+                <button
+                  key={ex}
+                  type="button"
+                  onClick={() => {
+                    haptic('light');
+                    setTwinsQuery(ex);
+                    runTwinsSearch({ query: ex });
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-[#F4F7FB] hover:bg-[#E8F5FE] border border-[#E2E8F0] hover:border-[#BAE3FC] text-[10.5px] font-bold text-[#334155] hover:text-[#0077C8] transition-colors cursor-pointer"
+                >
+                  {ex}
+                </button>
+              ))}
+            </div>
+          </section>
+
+          {/* Error Banner */}
+          {twinsError && (
+            <div className="ton-card rounded-2xl p-4 border-[#FECACA] bg-[#FEF2F2]/60 text-xs font-bold text-[#B91C1C]">
+              {twinsError}
+            </div>
+          )}
+
+          {/* Loading Skeleton — Matches Scanner Grid */}
+          {twinsLoading && (
+            <div className="space-y-3">
+              <div className="ton-card rounded-2xl p-4 animate-pulse space-y-2">
+                <div className="h-4 bg-[#E2E8F0] rounded w-1/3" />
+                <div className="h-3 bg-[#F1F5F9] rounded w-2/3" />
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
+                {Array.from({ length: 12 }).map((_, idx) => (
+                  <div
+                    key={idx}
+                    className="ton-card rounded-2xl overflow-hidden animate-pulse"
+                  >
+                    <div className="aspect-square bg-[#E8F5FE]" />
+                    <div className="p-2.5 space-y-2">
+                      <div className="h-3.5 bg-[#E2E8F0] rounded w-3/4" />
+                      <div className="h-3 bg-[#F1F5F9] rounded w-1/2" />
+                      <div className="h-5 bg-[#E8F5FE] rounded w-2/3" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Empty State before first search */}
+          {!twinsLoading && !twinsResult && !twinsError && (
+            <div className="ton-card rounded-2xl p-7 text-center max-w-lg mx-auto space-y-2">
+              <div className="w-12 h-12 rounded-2xl bg-[#E8F5FE] border border-[#BAE3FC] flex items-center justify-center mx-auto">
+                <Copy className="w-5 h-5 text-[#0098EA]" />
+              </div>
+              <p className="text-sm font-extrabold text-[#0B1120]">
+                Знайдіть двійників будь-якого подарунка 1 в 1
+              </p>
+              <p className="text-xs text-[#64748B] leading-relaxed">
+                Введіть назву, номер, модель або посилання на NFT вище — GiftKit просканує Portals, MRKT, Tonnel, Getgems і Fragment, покаже попит та всі найсхожіші лоти по вигляду.
+              </p>
+            </div>
+          )}
+
+          {/* Results: Target Gift + Demand Pulse + Scanner-Identical Twins Grid */}
+          {!twinsLoading && twinsResult && (
+            <div className="space-y-3.5">
+              {/* Target NFT + Demand Pulse Row */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
+                {/* Resolved Target Gift Card (clickable -> opens exact same NftDetailDrawer!) */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    haptic('light');
+                    onSelectListing(twinsResult.target);
+                  }}
+                  className="lg:col-span-5 ton-card ton-card-hover rounded-2xl p-3 flex items-center gap-3 text-left cursor-pointer border-[#BAE3FC] bg-gradient-to-br from-white to-[#F4F9FF]"
+                >
+                  <div className="w-20 h-20 rounded-2xl overflow-hidden bg-[#F4F7FB] border border-[#E2E8F0] shrink-0">
+                    <NftImage
+                      src={twinsResult.target.photo_url}
+                      alt={`${twinsResult.target.collection_name} #${twinsResult.target.number}`}
+                      collectionName={twinsResult.target.collection_name}
+                      shortName={twinsResult.target.short_name}
+                      modelName={twinsResult.target_traits.model}
+                      backdropName={twinsResult.target_traits.backdrop}
+                      symbolName={twinsResult.target_traits.symbol}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="px-1.5 py-0.5 rounded-md bg-[#0098EA] text-white text-[9.5px] font-extrabold">
+                        ОРИГІНАЛ
+                      </span>
+                      <span className="text-[10.5px] font-bold text-[#64748B] tabular-nums">
+                        {formatTon(twinsResult.target.price)} TON
                       </span>
                     </div>
-                  )}
+                    <h3 className="font-display text-[15px] font-extrabold text-[#0B1120] truncate">
+                      {twinsResult.target.collection_name}{' '}
+                      <span className="text-[#0098EA] tabular-nums">
+                        #{twinsResult.target.number}
+                      </span>
+                    </h3>
+                    <div className="flex items-center gap-1 flex-wrap">
+                      {twinsResult.target_traits.model && (
+                        <span className="px-1.5 py-0.5 rounded-md bg-[#E8F5FE] text-[#0077C8] text-[10px] font-bold truncate max-w-full">
+                          {twinsResult.target_traits.model}
+                        </span>
+                      )}
+                      {twinsResult.target_traits.backdrop && (
+                        <span className="px-1.5 py-0.5 rounded-md bg-[#F4F7FB] border border-[#E2E8F0] text-[#334155] text-[10px] font-bold truncate max-w-full">
+                          {twinsResult.target_traits.backdrop}
+                        </span>
+                      )}
+                      {twinsResult.target_traits.symbol && (
+                        <span className="px-1.5 py-0.5 rounded-md bg-[#F4F7FB] border border-[#E2E8F0] text-[#64748B] text-[10px] font-semibold truncate max-w-full">
+                          {twinsResult.target_traits.symbol}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </button>
 
-                  <div className="p-3 text-[12px] text-[#0B1120] space-y-1.5 leading-relaxed">
-                    {previewListing ? (
-                      <>
-                        <p className="font-extrabold text-[13.5px]">
-                          {previewListing.collection_name} #{previewListing.number}
-                        </p>
-                        <div className="grid grid-cols-2 gap-1.5 text-[11.5px] bg-[#F8FAFC] rounded-xl p-2 border border-[#E2E8F0] tabular-nums">
-                          <div>
-                            Ціна: <strong>{formatTon(previewListing.price)} TON</strong>
-                          </div>
-                          <div>
-                            Флор: <strong>{formatTon(previewListing.collection_floor)} TON</strong>
-                          </div>
-                          <div>
-                            Fair Value:{' '}
-                            <strong className="text-[#0077C8]">
-                              {formatTon(previewListing.fair_value)} TON
-                            </strong>
-                          </div>
-                          <div>
-                            Профіт:{' '}
-                            <strong
-                              className={
-                                previewListing.net_profit_ton >= 0
-                                  ? 'text-[#0077C8]'
-                                  : 'text-[#0B1120]'
-                              }
-                            >
-                              {previewListing.net_profit_ton >= 0 ? '+' : ''}
-                              {formatTon(previewListing.net_profit_ton)} TON
-                            </strong>
-                          </div>
-                          {previewListing.model_floor ? (
-                            <div className="col-span-2 pt-1 border-t border-[#E2E8F0] text-[11px] text-[#334155]">
-                              Флор моделі:{' '}
-                              <strong className="text-[#0B1120]">
-                                {formatTon(previewListing.model_floor)} TON
-                              </strong>
-                              {' · '}Ліквідність:{' '}
-                              <strong className="text-[#0077C8]">
-                                {previewListing.liquidity_score}/100
-                              </strong>
-                            </div>
-                          ) : null}
-                        </div>
-                        {previewListing.attributes && previewListing.attributes.length > 0 && (
-                          <div className="flex flex-wrap gap-1 pt-0.5">
-                            {previewListing.attributes.slice(0, 3).map((attr, idx) => (
-                              <span
-                                key={`${attr.type}-${idx}`}
-                                className="px-2 py-0.5 rounded-lg bg-[#E8F5FE] text-[#0077C8] text-[10px] font-bold"
-                              >
-                                {attr.value} ({attr.rarity_percent.toFixed(1)}%)
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <p className="whitespace-pre-line text-xs text-[#334155]">
-                        {tgPreview?.message || tgPreview?.caption || 'Тестовий алерт сформовано.'}
+                {/* Demand & Pricing Summary */}
+                <div className="lg:col-span-7 ton-card rounded-2xl p-3.5 flex flex-col justify-between gap-2.5">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-xs font-extrabold text-[#0B1120] inline-flex items-center gap-1.5">
+                      <TrendingUp className="w-3.5 h-3.5 text-[#0098EA]" />
+                      Попит на цей вигляд
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="px-2 py-0.5 rounded-lg bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] text-[10.5px] font-extrabold">
+                        {twinsResult.demand.demand_label}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] text-[#334155] text-[10.5px] font-bold tabular-nums">
+                        {twinsResult.demand.sales_24h} прод/24г
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-4 gap-1.5 tabular-nums">
+                    <div className="rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] px-2.5 py-1.5">
+                      <p className="text-[9.5px] font-bold text-[#64748B]">Двійників</p>
+                      <p className="text-[13px] font-extrabold text-[#0B1120]">
+                        {twinsResult.demand.total_twins}
                       </p>
-                    )}
+                    </div>
+                    <div className="rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] px-2.5 py-1.5">
+                      <p className="text-[9.5px] font-bold text-[#64748B]">Від (мін)</p>
+                      <p className="text-[13px] font-extrabold text-[#0098EA]">
+                        {formatTon(twinsResult.demand.min_price, 1)} TON
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] px-2.5 py-1.5">
+                      <p className="text-[9.5px] font-bold text-[#64748B]">Медіана</p>
+                      <p className="text-[13px] font-extrabold text-[#0B1120]">
+                        {formatTon(twinsResult.demand.median_price, 1)} TON
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-[#E8F5FE]/65 border border-[#BAE3FC] px-2.5 py-1.5">
+                      <p className="text-[9.5px] font-bold text-[#0077C8]">Швидк. ціна</p>
+                      <p className="text-[13px] font-extrabold text-[#0077C8]">
+                        {formatTon(twinsResult.demand.recommended_sell, 1)} TON
+                      </p>
+                    </div>
                   </div>
 
-                  {/* Inline Telegram Buttons */}
-                  <div className="px-2.5 pb-2.5 grid grid-cols-2 gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => previewListing && onSelectListing(previewListing)}
-                      className="py-2 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] text-[#0077C8] text-[11px] font-bold inline-flex items-center justify-center gap-1 cursor-pointer"
-                    >
-                      <ShoppingCart className="w-3 h-3" />
-                      <span>Купити / Деталі</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSubTab('offers')}
-                      className="py-2 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] text-[#0077C8] text-[11px] font-bold inline-flex items-center justify-center gap-1 cursor-pointer"
-                    >
-                      <Zap className="w-3 h-3" />
-                      <span>Поставити офер</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => previewListing && onSelectListing(previewListing)}
-                      className="col-span-2 py-2 rounded-xl bg-[#0098EA] hover:bg-[#0077C8] text-white text-[11px] font-bold inline-flex items-center justify-center gap-1 cursor-pointer"
-                    >
-                      <span>Відкрити в GiftKit</span>
-                      <ExternalLink className="w-3 h-3" />
-                    </button>
-                  </div>
+                  <p className="text-[11px] font-medium text-[#334155] leading-snug">
+                    {twinsResult.demand.demand_summary}
+                  </p>
                 </div>
               </div>
-            )}
-          </div>
 
-          {/* Right: Alert History List — Rich Mini NFT Cards */}
-          <div className="lg:col-span-7 space-y-2.5">
-            <h3 className="font-display text-[14px] font-extrabold text-[#0B1120] px-0.5 flex items-center gap-1.5">
-              <Bell className="w-4 h-4 text-[#0098EA]" />
-              Журнал спрацювань ({alerts.length})
-            </h3>
-            {alerts.length === 0 ? (
-              <div className="ton-card rounded-2xl p-6 text-center text-xs text-[#64748B]">
-                Журнал порожній. Натисніть «Тест ТГ-картки», щоб перевірити алерти.
+              {/* Filter & Sort Bar (Same Feel as Scanner) */}
+              <div className="ton-card rounded-2xl p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+                  {TWINS_MARKETS.map((m) => {
+                    const active = twinsMarket === m.key;
+                    const mCount =
+                      m.key === 'all'
+                        ? twinsResult.items.length
+                        : twinsResult.items.filter(
+                            (it) => (it.market || '').toLowerCase() === m.key,
+                          ).length;
+                    if (m.key !== 'all' && mCount === 0) return null;
+                    return (
+                      <button
+                        key={m.key}
+                        type="button"
+                        onClick={() => {
+                          haptic('light');
+                          setTwinsMarket(m.key);
+                        }}
+                        className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold shrink-0 transition-colors cursor-pointer ${
+                          active
+                            ? 'ton-btn-primary text-white'
+                            : 'bg-[#F4F7FB] text-[#334155] hover:bg-[#E8F5FE] hover:text-[#0077C8]'
+                        }`}
+                      >
+                        {m.label}{' '}
+                        <span className={active ? 'text-white/85' : 'text-[#64748B]'}>
+                          ({mCount})
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-[11px] font-extrabold text-[#0B1120] tabular-nums">
+                    {filteredTwins.length} лотів
+                  </span>
+                  <select
+                    value={twinsSort}
+                    onChange={(e) => {
+                      const nextSort = e.target.value as TwinsSort;
+                      setTwinsSort(nextSort);
+                      if (lastTwinsParams) {
+                        runTwinsSearch(lastTwinsParams, nextSort);
+                      }
+                    }}
+                    className="h-8 px-2.5 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] text-[#0B1120] text-[11px] font-bold focus:outline-none focus:border-[#0098EA] cursor-pointer"
+                  >
+                    <option value="similarity">Схожість 1:1</option>
+                    <option value="price_asc">Дешевші</option>
+                    <option value="discount_desc">Вигода</option>
+                  </select>
+                </div>
               </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-2.5">
-                {alerts.map((al) => {
-                  const lst = al.listing;
-                  const titleText = lst
-                    ? `${lst.collection_name} #${lst.number}`
-                    : al.title || al.rule_name || 'Спрацювання снайпера';
-                  const marketUrl = lst
-                    ? lst.market_url ||
-                      getMarketCollectionUrl(lst.market, lst.short_name, lst.collection_name)
-                    : 'https://portal-market.com';
-                  const tgNftUrl = lst?.tg_id
-                    ? `https://t.me/nft/${lst.tg_id}`
-                    : 'https://t.me/GiftKit_bot';
 
-                  return (
-                    <div
-                      key={al.id}
-                      onClick={() => handleSelectAlertCard(al)}
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault();
-                          handleSelectAlertCard(al);
-                        }
-                      }}
-                      className="w-full text-left ton-card ton-card-hover rounded-2xl p-3 flex flex-col gap-2.5 cursor-pointer"
-                    >
-                      <div className="flex items-start gap-3">
-                        {/* Left: Square NFT thumbnail */}
-                        <div className="w-16 h-16 rounded-xl overflow-hidden bg-[#F4F7FB] border border-[#E2E8F0] shrink-0">
-                          <NftImage
-                            src={lst?.photo_url}
-                            alt={titleText}
-                            collectionName={lst?.collection_name}
-                            shortName={lst?.short_name}
-                            modelName={lst?.attributes?.find((a) => a.type === 'model')?.value}
-                            backdropName={lst?.attributes?.find((a) => a.type === 'backdrop')?.value}
-                            symbolName={lst?.attributes?.find((a) => a.type === 'symbol')?.value}
-                            className="w-full h-full object-cover"
-                          />
-                        </div>
-
-                        {/* Center: Title, Valuation & Badges */}
-                        <div className="flex-1 min-w-0 space-y-1">
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="text-[13px] font-extrabold text-[#0B1120] truncate">
-                              {titleText}
-                            </p>
-                            <span className="text-[10.5px] font-semibold text-[#64748B] shrink-0">
-                              {formatTimeAgo(al.created_at)}
-                            </span>
-                          </div>
-
-                          {lst ? (
-                            <>
-                              {/* Price & Valuation Row */}
-                              <div className="flex items-center gap-1.5 flex-wrap text-[11px] text-[#334155] tabular-nums">
-                                <span>
-                                  Ціна: <strong className="text-[#0B1120]">{formatTon(lst.price)} TON</strong>
-                                </span>
-                                <span>·</span>
-                                <span>Флор: {formatTon(lst.collection_floor)} TON</span>
-                                <span>·</span>
-                                <span>
-                                  Fair: <strong className="text-[#0077C8]">{formatTon(lst.fair_value)} TON</strong>
-                                </span>
-                                <span className="px-1.5 py-0.5 rounded-md bg-[#0098EA] text-white text-[10px] font-extrabold">
-                                  -{Math.round(lst.discount_percent)}%
-                                </span>
-                              </div>
-
-                              {/* Visual / Nice Number / Symbol Badges Row */}
-                              <div className="flex items-center gap-1.5 flex-wrap pt-0.5">
-                                {typeof lst.visual_score === 'number' && (
-                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] text-[10px] font-bold tabular-nums">
-                                    <Eye className="w-2.5 h-2.5" />
-                                    Візуал {lst.visual_score.toFixed(1)}/10
-                                  </span>
-                                )}
-                                {lst.harmony_label && (
-                                  <span className="px-1.5 py-0.5 rounded-md bg-[#F0F8FF] text-[#0098EA] border border-[#BAE3FC] text-[10px] font-bold">
-                                    {lst.harmony_label}
-                                  </span>
-                                )}
-                                {(lst.number_pattern || lst.number_badge) && (
-                                  <span className="px-1.5 py-0.5 rounded-md bg-[#E8F5FE] text-[#0077C8] border border-[#BAE3FC] text-[10px] font-bold">
-                                    {lst.number_pattern || lst.number_badge}
-                                  </span>
-                                )}
-                                {lst.symbol_badge && (
-                                  <span className="px-1.5 py-0.5 rounded-md bg-[#F8FAFC] text-[#334155] border border-[#E2E8F0] text-[10px] font-bold">
-                                    {lst.symbol_badge}
-                                  </span>
-                                )}
-                              </div>
-                            </>
-                          ) : (
-                            <p className="text-[11px] text-[#334155] line-clamp-2">
-                              {al.message || 'Новий сигнал снайпера — натисніть для відкриття NFT'}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Direct Action Links Row */}
-                      <div className="flex items-center gap-1.5 pt-2 border-t border-[#F1F5F9]">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleSelectAlertCard(al);
-                          }}
-                          className="flex-1 h-8 px-2.5 rounded-xl bg-[#0098EA] hover:bg-[#0077C8] text-white text-[11px] font-extrabold inline-flex items-center justify-center gap-1 cursor-pointer transition-colors"
-                        >
-                          <span>Відкрити NFT</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            haptic('light');
-                            openExternalLink(marketUrl);
-                          }}
-                          className="h-8 px-2.5 rounded-xl bg-[#E8F5FE] hover:bg-[#D4ECFD] border border-[#BAE3FC] text-[#0077C8] text-[11px] font-bold inline-flex items-center justify-center gap-1 transition-colors cursor-pointer"
-                        >
-                          <span>На маркеті</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            haptic('light');
-                            openExternalLink(tgNftUrl);
-                          }}
-                          className="h-8 px-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#E8F5FE] border border-[#E2E8F0] hover:border-[#BAE3FC] text-[#0B1120] hover:text-[#0077C8] text-[11px] font-bold inline-flex items-center justify-center gap-1 transition-colors cursor-pointer"
-                        >
-                          <span>Власник в ТГ</span>
-                          <ExternalLink className="w-3 h-3" />
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+              {/* Exact Scanner NFT Grid — Same Cards & Same Full-Screen Drawer */}
+              {filteredTwins.length === 0 ? (
+                <div className="ton-card rounded-2xl p-8 text-center max-w-md mx-auto">
+                  <p className="text-sm font-bold text-[#0B1120]">
+                    Двійників у продажу зараз не знайдено
+                  </p>
+                  <p className="text-xs text-[#64748B] mt-1">
+                    Це рідкісний вигляд або спробуйте обрати вкладку «Всі» маркети.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3">
+                  {filteredTwins.map((item) => (
+                    <NftCard
+                      key={item.id}
+                      item={item}
+                      tonUsd={tonUsd}
+                      onSelect={onSelectListing}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

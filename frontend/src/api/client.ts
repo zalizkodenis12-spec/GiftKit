@@ -624,6 +624,26 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  searchVisualTwins: (params: {
+    query?: string;
+    collection?: string;
+    model?: string;
+    backdrop?: string;
+    symbol?: string;
+    sort?: 'similarity' | 'price_asc' | 'discount_desc';
+    limit?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params.query) qs.set('query', params.query);
+    if (params.collection) qs.set('collection', params.collection);
+    if (params.model) qs.set('model', params.model);
+    if (params.backdrop) qs.set('backdrop', params.backdrop);
+    if (params.symbol) qs.set('symbol', params.symbol);
+    if (params.sort) qs.set('sort', params.sort);
+    if (params.limit) qs.set('limit', String(params.limit));
+    return request<import('../types/api').VisualTwinsResponse>(`/twins/search?${qs.toString()}`);
+  },
 };
 
 export function useLiveSocket(onEvent: (event: LiveSocketEvent) => void) {

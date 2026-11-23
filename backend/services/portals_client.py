@@ -476,6 +476,7 @@ class PortalsClient:
         max_price: float | None = None,
         search: str | None = None,
         filter_by_models: str | None = None,
+        filter_by_backdrops: str | None = None,
         force_refresh: bool = False,
     ) -> list[dict[str, Any]]:
         """GET /nfts/search (cached 12s)."""
@@ -492,6 +493,8 @@ class PortalsClient:
             params["search"] = search
         if filter_by_models:
             params["filter_by_models"] = filter_by_models
+        if filter_by_backdrops:
+            params["filter_by_backdrops"] = filter_by_backdrops
 
         cache_key = f"nfts:{sorted(params.items())}"
         if not force_refresh:

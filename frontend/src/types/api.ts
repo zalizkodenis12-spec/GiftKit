@@ -76,6 +76,43 @@ export interface AnalyzedListing {
   trend_boost_percent?: number;
   trend_label?: string | null;
   ai_vision_comment?: string | null;
+  // Visual 1:1 Twins optional match metadata
+  similarity_percent?: number;
+  similarity_label?: string;
+  similarity_reason?: string;
+}
+
+export interface VisualTwinsDemand {
+  total_twins: number;
+  exact_count: number;
+  close_count: number;
+  markets_covered: string[];
+  min_price: number;
+  exact_floor: number;
+  median_price: number;
+  max_price: number;
+  recommended_sell: number;
+  sales_24h: number;
+  liquidity_score: number;
+  demand_level: 'high' | 'medium' | 'rare' | string;
+  demand_label: string;
+  demand_summary: string;
+}
+
+export interface VisualTwinsResponse {
+  query: string;
+  target: AnalyzedListing;
+  target_traits: {
+    collection: string;
+    short_name: string;
+    model: string;
+    backdrop: string;
+    symbol: string;
+  };
+  demand: VisualTwinsDemand;
+  items: AnalyzedListing[];
+  total: number;
+  generated_at: string;
 }
 
 export interface TrendingBackdrop {
