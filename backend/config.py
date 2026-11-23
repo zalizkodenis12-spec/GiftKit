@@ -26,10 +26,17 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    APP_NAME: str = "TON Gift Terminal Pro"
+    APP_NAME: str = "GiftKit"
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     DATABASE_PATH: str = "data/terminal.db"
+
+    # Persistent Cloud Storage (Upstash Redis / Vercel KV — keeps rules & alerts 24/7 on Vercel)
+    KV_REST_API_URL: str = ""
+    KV_REST_API_TOKEN: str = ""
+    UPSTASH_REDIS_REST_URL: str = ""
+    UPSTASH_REDIS_REST_TOKEN: str = ""
+    CRON_SECRET: str = ""
 
     # Risk & Trading
     DRY_RUN: bool = True

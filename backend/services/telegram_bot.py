@@ -557,10 +557,17 @@ class TelegramBotService:
             logger.error(f"Telegram webhook update processing error: {exc}")
             return False
 
-    async def send_sniper_alert(self, listing: AnalyzedListing, rule_name: str) -> bool:
-        """Send photo alert card with inline trade buttons to configured TG_ADMIN_CHAT_ID."""
-        chat_id = runtime_config.tg_admin_chat_id.strip()
-        if not chat_id:
+    async def send_sniper_alert(
+        self,
+        listing: AnalyzedListing,
+        rule_name: str,
+        chat_id: str | None = None,
+    ) -> bool:
+        """Send photo alert card with inline trade buttons to user's Telegram chat (works on Vercel 24/7)."""
+        target_chat = (chat_id or "").strip()
+        if not target_chat or not target_chat.lstrip("-").isdigit():
+            target_chat = runtime_config.tg_admin_chat_id.strip()
+        if not target_chat:
             return False
         if not self.bot or not self.is_connected:
             await self._ensure_bot_and_dp()
@@ -568,21 +575,46 @@ class TelegramBotService:
             return False
         if not self._admin_user_cache:
             try:
-                await self.resolve_chat_profile(chat_id)
+                await self.resolve_chat_profile(target_chat)
             except Exception:
                 pass
         caption = format_telegram_alert_html(listing, rule_name)
         kb = self._build_sniper_keyboard(listing)
         try:
-            await self.bot.send_photo(chat_id=chat_id, photo=listing.photo_url, caption=caption, reply_markup=kb)
+            await self.bot.send_photo(chat_id=target_chat, photo=listing.photo_url, caption=caption, reply_markup=kb)
             return True
         except Exception:
             try:
-                await self.bot.send_message(chat_id=chat_id, text=caption, reply_markup=kb)
+                await self.bot.send_message(chat_id=target_chat, text=caption, reply_markup=kb)
                 return True
             except Exception as exc:
-                logger.warning(f"Failed to send sniper alert to Telegram: {exc}")
+                logger.warning(f"Failed to send sniper alert to Telegram ({target_chat}): {exc}")
                 return False
+
+    async def configure_webhook(self, webhook_url: str, secret_token: str = "") -> dict[str, Any]:
+        """Configure official Telegram Webhook so @GiftKit_bot responds 24/7 in the cloud without a laptop."""
+        ready = await self._ensure_bot_and_dp()
+        if not ready or not self.bot:
+            return {"ok": False, "error": "TG_BOT_TOKEN not configured"}
+        try:
+            await self.sync_menu_button()
+            kwargs: dict[str, Any] = {
+                "url": webhook_url,
+                "allowed_updates": ["message", "callback_query"],
+                "drop_pending_updates": False,
+            }
+            if secret_token:
+                kwargs["secret_token"] = secret_token
+            await self.bot.set_webhook(**kwargs)
+            info = await self.bot.get_webhook_info()
+            return {
+                "ok": True,
+                "webhook_url": info.url,
+                "pending_update_count": info.pending_update_count,
+                "bot_username": self.bot_username,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     async def send_undercut_alert(self, item: dict[str, Any]) -> bool:
         """Send instant competitor undercut warning with 1-click price adjustment buttons."""
@@ -705,6 +737,16 @@ class TelegramBotService:
                 except Exception:
                     pass
             await self.sync_menu_button()
+            # If a cloud webhook is already active on Vercel, do NOT kill it with local polling!
+            try:
+                wh_info = await self.bot.get_webhook_info()
+                if wh_info and getattr(wh_info, "url", ""):
+                    logger.info(
+                        f"Telegram Bot @{self.bot_username} is running 24/7 via Cloud Webhook ({wh_info.url}) — skipping local polling"
+                    )
+                    return
+            except Exception:
+                pass
             self._poll_task = asyncio.create_task(self._run_polling(), name="telegram_bot_polling")
             logger.info(f"Telegram Bot started as @{self.bot_username}")
         except Exception as exc:

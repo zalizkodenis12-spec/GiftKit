@@ -443,7 +443,15 @@ class Database:
             "deleted_offer_ids": user["deleted_offer_ids"],
             "deleted_portfolio_ids": user["deleted_portfolio_ids"],
         }
-        return auth_service.sign_state_envelope(uid, payload)
+        signed = auth_service.sign_state_envelope(uid, payload)
+        try:
+            from backend.services.cloud_store import cloud_store
+
+            if cloud_store.is_configured:
+                await cloud_store.save_user_state(uid, signed)
+        except Exception:
+            pass
+        return signed
 
     async def import_user_state(self, user_id: str, envelope_data: dict[str, Any]) -> bool:
         """Verify and restore user's rules, offers, portfolio & tombstones from a signed envelope."""

@@ -16,56 +16,60 @@ from backend.models import AnalyzedListing
 from backend.services import auth_service
 from backend.services.analytics_engine import analytics_engine
 from backend.services.auth_service import DEFAULT_ADMIN_USER_ID
+from backend.services.cloud_store import cloud_store
 from backend.services.visual_analyzer import visual_analyzer
 from backend.services.ws_manager import ws_manager
 
 
+def _effective_reference_floor(listing: AnalyzedListing) -> float:
+    """Use max(collection_floor, model_floor) so rare underpriced models (50-500 TON) aren't falsely rejected."""
+    return max(float(listing.collection_floor or 0.0), float(listing.model_floor or 0.0))
+
+
 def _collect_gem_reasons(listing: AnalyzedListing) -> list[str]:
     """Return crisp Ukrainian reasons why a listing is genuinely worth flipping."""
+    ref_floor = _effective_reference_floor(listing)
     if (
         listing.discount_percent <= 0
         or listing.net_profit_ton <= 0
         or listing.verdict == "OVERPRICED"
-        or (listing.collection_floor > 0 and listing.price > listing.collection_floor * 1.02)
+        or (ref_floor > 0 and listing.price > ref_floor * 1.03)
     ):
         return []
 
-    deep_discount = (
-        listing.collection_floor > 0
-        and listing.price <= listing.collection_floor * 0.85
-        and listing.discount_percent >= 15.0
-    )
-
-    # Hard Visual Quality Floor: never alert on ugly/muddy/clashing items unless >=15% below collection floor
-    if listing.visual_score < 7.6 and not deep_discount:
-        return []
-
+    at_floor = ref_floor <= 0 or listing.price <= ref_floor * 1.03
     reasons: list[str] = []
-    at_floor = listing.collection_floor <= 0 or listing.price <= listing.collection_floor * 1.02
-    visual_ok = listing.visual_score >= 7.5 or listing.is_monochrome or bool(listing.harmony_label)
 
-    if listing.is_monochrome and listing.visual_score >= 7.8 and at_floor:
+    # 1. Real Monochrome / Aesthetic Harmony at or below floor
+    if listing.is_monochrome and listing.visual_score >= 6.2 and at_floor:
         reasons.append("Монохром")
-    elif listing.harmony_label and listing.visual_score >= 7.6 and at_floor:
+    elif listing.harmony_label and listing.visual_score >= 7.2 and at_floor:
         reasons.append(listing.harmony_label)
 
-    if listing.number_bonus_percent >= 18.0 and visual_ok and at_floor:
+    # 2. Valuable Nice Number (e.g. #15550, #19091, #777, #8888) at floor with positive profit
+    if listing.number_bonus_percent >= 15.0 and at_floor:
         reasons.append(listing.number_pattern or f"Топ номер #{listing.number}")
-    elif listing.number_bonus_percent >= 10.0 and visual_ok and at_floor:
+    elif listing.number_bonus_percent >= 10.0 and listing.visual_score >= 6.0 and at_floor:
         reasons.append(listing.number_pattern or f"Красивий номер #{listing.number}")
 
-    if listing.symbol_badge and listing.symbol_bonus_percent >= 8.5 and visual_ok and at_floor:
+    # 3. Rare background icon (symbol) at floor
+    if listing.symbol_badge and listing.symbol_bonus_percent >= 10.0 and at_floor:
+        reasons.append(listing.symbol_badge)
+    elif listing.symbol_badge and listing.symbol_bonus_percent >= 8.0 and listing.visual_score >= 6.2 and at_floor:
         reasons.append(listing.symbol_badge)
 
+    # 4. Underpriced below collection or model floor
     if (
-        listing.collection_floor > 0
-        and listing.price <= listing.collection_floor * 0.94
+        ref_floor > 0
+        and listing.price <= ref_floor * 0.94
         and listing.discount_percent >= 12.0
     ):
-        pct_below = round((1.0 - listing.price / listing.collection_floor) * 100.0, 1)
-        reasons.append(f"Нижче флора (-{pct_below}%)")
+        pct_below = round((1.0 - listing.price / ref_floor) * 100.0, 1)
+        label_base = "Нижче флора моделі" if listing.model_floor > listing.collection_floor * 1.05 else "Нижче флора"
+        reasons.append(f"{label_base} (-{pct_below}%)")
 
-    if listing.visual_score >= 8.2 and at_floor and not reasons:
+    # 5. Pure top visual aesthetic at floor
+    if listing.visual_score >= 7.8 and at_floor and not reasons:
         reasons.append(f"Топ візуал {listing.visual_score:.1f}/10")
 
     return reasons
@@ -171,10 +175,10 @@ class SniperEngine:
         self._running = False
         self._seen_keys: set[str] = set()
         self._last_rule_alert_ts: dict[int, float] = {}
-        self._send_tg_alert: Callable[[AnalyzedListing, str], Awaitable[bool]] | None = None
+        self._send_tg_alert: Callable[..., Awaitable[bool]] | None = None
 
     def register_telegram_sender(
-        self, sender: Callable[[AnalyzedListing, str], Awaitable[bool]]
+        self, sender: Callable[..., Awaitable[bool]]
     ) -> None:
         self._send_tg_alert = sender
 
@@ -272,16 +276,137 @@ class SniperEngine:
         except Exception as exc:
             logger.debug(f"Remote bot-sync skipped: {exc}")
 
-    async def evaluate_once(self) -> list[dict[str, Any]]:
-        """Run one scan cycle across active sniper rules."""
-        admin_uid = (runtime_config.tg_admin_chat_id or DEFAULT_ADMIN_USER_ID).strip() or DEFAULT_ADMIN_USER_ID
-        await self._sync_with_remote_webapp(admin_uid)
+    async def _gather_candidates_for_rules(self, rules: list[dict[str, Any]]) -> list[AnalyzedListing]:
+        """Fetch live listings tailored to every active rule (including 50-500+ TON & specific collections)."""
+        pool: list[AnalyzedListing] = []
+        seen_ids: set[str] = set()
 
-        rules = [r for r in await db.list_sniper_rules(user_id=admin_uid) if r["enabled"]]
+        def _merge(batch: list[AnalyzedListing]) -> None:
+            for item in batch:
+                if item.id and item.id not in seen_ids:
+                    seen_ids.add(item.id)
+                    pool.append(item)
+
+        # 1. General freshest & best-discount pool
+        try:
+            base_items = await analytics_engine.get_analyzed_listings(sort="discount_desc", limit=50)
+            _merge(base_items)
+        except Exception as exc:
+            logger.debug(f"Sniper base pool fetch skipped: {exc}")
+
+        # 2. Targeted fetches for specific collections in rules
+        target_cols: dict[str, float] = {}
+        target_models: dict[str, tuple[str | None, float]] = {}
+        high_budget_caps: list[float] = []
+
+        for r in rules:
+            col = (r.get("collection_short_name") or "").strip().lower()
+            max_p = float(r.get("max_price") or 500.0)
+            model_f = (r.get("model_filter") or "").strip()
+            if col:
+                target_cols[col] = max(target_cols.get(col, 0.0), max_p)
+            elif max_p >= 25.0:
+                high_budget_caps.append(max_p)
+            if model_f:
+                target_models[model_f.lower()] = (col or None, max_p)
+
+        for col_short, max_p in list(target_cols.items())[:5]:
+            try:
+                col_items = await analytics_engine.get_analyzed_listings(
+                    collection=col_short,
+                    max_price=max_p,
+                    sort="price_asc",
+                    limit=35,
+                )
+                _merge(col_items)
+            except Exception as exc:
+                logger.debug(f"Sniper targeted collection {col_short} skipped: {exc}")
+
+        for model_q, (col_opt, max_p) in list(target_models.items())[:3]:
+            try:
+                m_items = await analytics_engine.get_analyzed_listings(
+                    collection=col_opt,
+                    search=model_q,
+                    max_price=max_p,
+                    sort="price_asc",
+                    limit=25,
+                )
+                _merge(m_items)
+            except Exception as exc:
+                logger.debug(f"Sniper targeted model {model_q} skipped: {exc}")
+
+        # 3. High-budget sweep (e.g. rules with max_price = 50, 100, 300, 1000 TON across "All collections")
+        if high_budget_caps:
+            top_cap = max(high_budget_caps)
+            low_band = round(max(15.0, min(top_cap * 0.25, 120.0)), 1)
+            try:
+                mid_high = await analytics_engine.get_analyzed_listings(
+                    min_price=low_band,
+                    max_price=top_cap,
+                    sort="price_asc",
+                    limit=40,
+                )
+                _merge(mid_high)
+            except Exception as exc:
+                logger.debug(f"Sniper high-budget range fetch skipped: {exc}")
+
+            # Also inspect top 2 liquid collections whose floor sits in the user's target budget band
+            try:
+                all_cols = await analytics_engine.get_collections_summary(sort="volume_desc", limit=120)
+                band_cols = [
+                    c for c in all_cols
+                    if low_band * 0.7 <= c.floor_price <= top_cap * 1.05
+                    and c.short_name not in target_cols
+                    and c.liquidity_score >= 45
+                ][:2]
+                for bc in band_cols:
+                    b_items = await analytics_engine.get_analyzed_listings(
+                        collection=bc.short_name,
+                        max_price=top_cap,
+                        sort="price_asc",
+                        limit=25,
+                    )
+                    _merge(b_items)
+            except Exception as exc:
+                logger.debug(f"Sniper high-budget collections sweep skipped: {exc}")
+
+        pool.sort(key=lambda x: (x.discount_percent, x.net_profit_percent), reverse=True)
+        return pool
+
+    async def evaluate_once(self, target_user_ids: list[str] | None = None) -> list[dict[str, Any]]:
+        """Run one scan cycle across active sniper rules (works both locally and 24/7 on Vercel Cron)."""
+        admin_uid = (runtime_config.tg_admin_chat_id or DEFAULT_ADMIN_USER_ID).strip() or DEFAULT_ADMIN_USER_ID
+        if not IS_VERCEL:
+            await self._sync_with_remote_webapp(admin_uid)
+
+        user_ids: list[str] = []
+        if target_user_ids:
+            user_ids = [str(u).strip() for u in target_user_ids if str(u).strip()]
+        else:
+            cloud_users = await cloud_store.list_active_users() if cloud_store.is_configured else []
+            user_ids = list(dict.fromkeys([*cloud_users, admin_uid]))
+
+        # Hydrate latest user rules from persistent CloudStore (crucial for Vercel cold starts!)
+        if cloud_store.is_configured:
+            for uid in user_ids:
+                try:
+                    env = await cloud_store.load_user_state(uid)
+                    if isinstance(env, dict):
+                        await db.import_user_state(uid, env)
+                except Exception as exc:
+                    logger.debug(f"CloudStore hydrate skipped for {uid}: {exc}")
+
+        rules: list[dict[str, Any]] = []
+        for uid in user_ids:
+            user_rules = await db.list_sniper_rules(user_id=uid)
+            for r in user_rules:
+                if r.get("enabled"):
+                    rules.append(r)
+
         if not rules:
             return []
 
-        listings = await analytics_engine.get_analyzed_listings(sort="discount_desc", limit=50)
+        listings = await self._gather_candidates_for_rules(rules)
         triggered_alerts: list[dict[str, Any]] = []
         now_ts = time.time()
 
@@ -290,12 +415,13 @@ class SniperEngine:
             if listing.liquidity_score < 35:
                 continue
 
-            # Hard anti-overpriced & floor guard: never alert on unprofitable or above-floor lots
+            ref_floor = _effective_reference_floor(listing)
+            # Hard anti-overpriced & floor guard: never alert on unprofitable or above-model-floor lots
             if (
                 listing.discount_percent <= 0
                 or listing.net_profit_ton <= 0
                 or listing.verdict == "OVERPRICED"
-                or (listing.collection_floor > 0 and listing.price > listing.collection_floor * 1.02)
+                or (ref_floor > 0 and listing.price > ref_floor * 1.03)
             ):
                 continue
 
@@ -313,8 +439,11 @@ class SniperEngine:
                 if now_ts - self._last_rule_alert_ts.get(rule_id, 0.0) < 300.0:
                     continue
 
-                dedup_key = f"{rule_id}:{listing.tg_id or listing.id}"
+                dedup_key = f"{rule_uid}:{rule_id}:{listing.tg_id or listing.id}"
                 if dedup_key in self._seen_keys:
+                    continue
+                if cloud_store.is_configured and await cloud_store.is_alert_seen(dedup_key):
+                    self._seen_keys.add(dedup_key)
                     continue
 
                 if len(self._seen_keys) > 2000:
@@ -350,10 +479,21 @@ class SniperEngine:
                     ai_source = "cv_pixels"
                     worth_alert = None
 
-                # Enforce strict post-CV/AI visual floor even when ai_source == "cv_pixels"
-                if listing.visual_score < 7.5 and not (
-                    listing.collection_floor > 0 and listing.price <= listing.collection_floor * 0.85
-                ):
+                has_strong_math_edge = (
+                    (listing.number_bonus_percent >= 14.0 and (ref_floor <= 0 or listing.price <= ref_floor * 1.03))
+                    or (
+                        listing.symbol_bonus_percent >= 10.0
+                        and (ref_floor <= 0 or listing.price <= ref_floor * 1.03)
+                    )
+                    or (listing.is_monochrome and listing.visual_score >= 6.2 and (ref_floor <= 0 or listing.price <= ref_floor * 1.03))
+                    or (
+                        ref_floor > 0
+                        and listing.price <= ref_floor * 0.88
+                    )
+                )
+
+                # Enforce visual quality floor ONLY when there is no strong monochrome/number/symbol/discount edge
+                if listing.visual_score < 7.2 and not has_strong_math_edge:
                     logger.info(
                         f"Sniper vetoed weak visual {listing.collection_name} #{listing.number} (score={listing.visual_score})"
                     )
@@ -366,32 +506,21 @@ class SniperEngine:
                     )
                     continue
 
-                has_strong_math_edge = (
-                    (listing.number_bonus_percent >= 14.0 and listing.visual_score >= 7.5)
-                    or (
-                        listing.symbol_bonus_percent >= 8.5
-                        and listing.visual_score >= 7.5
-                        and listing.price <= listing.collection_floor * 1.02
-                    )
-                    or (
-                        listing.collection_floor > 0
-                        and listing.price <= listing.collection_floor * 0.85
-                    )
-                )
-
                 if ai_source in {"gemini", "openai"}:
                     if worth_alert is False and not has_strong_math_edge:
                         logger.info(
                             f"Sniper AI Vision vetoed {listing.collection_name} #{listing.number} (score={listing.visual_score}, worth_alert=False)"
                         )
                         continue
-                    if listing.visual_score < 7.5 and not has_strong_math_edge:
+                    if listing.visual_score < 7.2 and not has_strong_math_edge:
                         logger.info(
                             f"Sniper AI Vision vetoed weak visual {listing.collection_name} #{listing.number} (score={listing.visual_score})"
                         )
                         continue
 
                 self._last_rule_alert_ts[rule_id] = now_ts
+                if cloud_store.is_configured:
+                    await cloud_store.mark_alert_seen(dedup_key)
 
                 # Check risk guard if autobuy mode
                 autobuy_note = ""
@@ -434,6 +563,8 @@ class SniperEngine:
                 tg_sent = False
                 if self._send_tg_alert:
                     try:
+                        tg_sent = await self._send_tg_alert(listing, rule["name"], chat_id=rule_uid)
+                    except TypeError:
                         tg_sent = await self._send_tg_alert(listing, rule["name"])
                     except Exception as exc:
                         logger.warning(f"Sniper Telegram dispatch error: {exc}")
@@ -451,6 +582,12 @@ class SniperEngine:
                     telegram_sent=tg_sent,
                     user_id=rule_uid,
                 )
+                if cloud_store.is_configured:
+                    try:
+                        updated_env = await db.export_user_state(rule_uid)
+                        await cloud_store.save_user_state(rule_uid, updated_env)
+                    except Exception:
+                        pass
                 await ws_manager.broadcast("sniper_alert", log_entry)
                 triggered_alerts.append(log_entry)
                 if len(triggered_alerts) >= 3:
@@ -459,7 +596,7 @@ class SniperEngine:
             if len(triggered_alerts) >= 3:
                 break
 
-        if triggered_alerts:
+        if triggered_alerts and not IS_VERCEL:
             await self._sync_with_remote_webapp(admin_uid, pushed_alerts=triggered_alerts)
 
         return triggered_alerts

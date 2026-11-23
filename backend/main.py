@@ -52,6 +52,7 @@ from backend.models import (
 from backend.services import auth_service
 from backend.services.analytics_engine import analytics_engine
 from backend.services.auth_service import DEFAULT_ADMIN_USER_ID
+from backend.services.cloud_store import cloud_store
 from backend.services.getgems_client import getgems_client
 from backend.services.mrkt_client import mrkt_client
 from backend.services.mtproto_auth import mtproto_auth
@@ -348,6 +349,14 @@ async def get_request_user(request: Request) -> dict[str, Any]:
             user = await telegram_bot_service.resolve_chat_profile(default_id)
         authenticated = False
 
+    if cloud_store.is_configured:
+        try:
+            cloud_env = await cloud_store.load_user_state(user["tg_user_id"])
+            if isinstance(cloud_env, dict):
+                await db.import_user_state(user["tg_user_id"], cloud_env)
+        except Exception as exc:
+            logger.debug(f"CloudStore user hydrate skipped: {exc}")
+
     if isinstance(parsed_state_env, dict):
         try:
             imported = await db.import_user_state(user["tg_user_id"], parsed_state_env)
@@ -355,6 +364,8 @@ async def get_request_user(request: Request) -> dict[str, Any]:
                 refreshed = await db.get_user(user["tg_user_id"])
                 if refreshed:
                     user = refreshed
+                if cloud_store.is_configured:
+                    await cloud_store.save_user_state(user["tg_user_id"], parsed_state_env)
         except Exception as exc:
             logger.debug(f"X-GiftKit-State import skipped: {exc}")
 
@@ -560,6 +571,8 @@ async def post_internal_bot_sync(
             cred_updates["tonnel_init_data"] = new_tonnel
         if cred_updates:
             await db.save_settings(cred_updates)
+            if cloud_store.is_configured:
+                await cloud_store.save_market_credentials(cred_updates)
             analytics_engine.clear_caches()
             logger.info(f"Updated live market credentials via bot-sync: {list(cred_updates.keys())}")
 
@@ -569,6 +582,8 @@ async def post_internal_bot_sync(
             collections=m_snap.get("collections") if isinstance(m_snap.get("collections"), dict) else None,
             listings=m_snap.get("listings") if isinstance(m_snap.get("listings"), list) else None,
         )
+        if cloud_store.is_configured:
+            await cloud_store.save_mrkt_snapshot(m_snap)
         analytics_engine._listings_cache = None
 
     alerts = body.get("alerts")
@@ -612,7 +627,8 @@ async def get_health() -> dict[str, Any]:
         "status": "ok",
         "vercel": IS_VERCEL,
         "live_markets": multi_market.get_live_markets(),
-        "bot_connected": telegram_bot_service.is_connected,
+        "bot_connected": telegram_bot_service.is_connected or bool(runtime_config.tg_bot_token),
+        "cloud_store": cloud_store.is_configured,
         "timestamp": utc_now_iso(),
     }
 
@@ -876,6 +892,51 @@ async def post_telegram_webhook(request: Request) -> dict[str, Any]:
         return {"ok": False, "error": "invalid_json"}
     processed = await telegram_bot_service.process_webhook_update(update_data)
     return {"ok": True, "processed": processed}
+
+
+@app.post("/api/telegram/setup-webhook")
+async def post_telegram_setup_webhook(request: Request) -> dict[str, Any]:
+    """Activate official Telegram Webhook on Vercel so @GiftKit_bot runs 24/7 with laptop OFF."""
+    sig = (request.headers.get("X-Bot-Sync-Signature") or "").strip()
+    if not auth_service.verify_bot_sync_signature(sig):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    base_url = (runtime_config.webapp_url or "").strip().rstrip("/")
+    if not base_url.startswith("https://") or "t.me" in base_url:
+        base_url = "https://giftkit-ten.vercel.app"
+    webhook_url = f"{base_url}/api/telegram/webhook"
+    return await telegram_bot_service.configure_webhook(webhook_url)
+
+
+@app.api_route("/api/cron/sniper-tick", methods=["GET", "POST"])
+async def cron_sniper_tick(request: Request) -> dict[str, Any]:
+    """24/7 Cloud Sniper Cron endpoint (triggered by GitHub Actions / Vercel Cron with laptop OFF)."""
+    # Hydrate latest market credentials & MRKT snapshot from persistent CloudStore if available
+    if cloud_store.is_configured:
+        try:
+            creds = await cloud_store.load_market_credentials()
+            if creds:
+                runtime_config.apply_overrides(creds)
+            snap = await cloud_store.load_mrkt_snapshot()
+            if isinstance(snap, dict):
+                mrkt_client.ingest_pushed_snapshot(
+                    collections=snap.get("collections") if isinstance(snap.get("collections"), dict) else None,
+                    listings=snap.get("listings") if isinstance(snap.get("listings"), list) else None,
+                )
+        except Exception as exc:
+            logger.debug(f"Cron cloud hydrate skipped: {exc}")
+
+    # Ensure Telegram sender is wired even on Vercel cold start
+    sniper_engine.register_telegram_sender(telegram_bot_service.send_sniper_alert)
+
+    alerts = await sniper_engine.evaluate_once()
+    return {
+        "ok": True,
+        "vercel": IS_VERCEL,
+        "cloud_store": cloud_store.is_configured,
+        "triggered_alerts": len(alerts),
+        "alerts": [a.get("title") for a in alerts],
+        "timestamp": utc_now_iso(),
+    }
 
 
 # ==============================================================================
