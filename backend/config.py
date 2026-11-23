@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     # Telegram Bot & Mini App
     TG_BOT_TOKEN: str = ""
     TG_ADMIN_CHAT_ID: str = ""
-    WEBAPP_URL: str = "https://t.me"
+    WEBAPP_URL: str = "https://giftkit-ten.vercel.app"
 
     # Official Telegram MTProto Client API (for automated MRKT & Tonnel initData refresh)
     TG_API_ID: int = 0
@@ -216,7 +216,10 @@ class RuntimeConfig:
 
     @property
     def webapp_url(self) -> str:
-        return str(self.get("webapp_url")) or "https://t.me"
+        raw = str(self.get("webapp_url") or "").strip()
+        if not raw or raw in ("https://t.me", "https://your-miniapp-domain.com") or not raw.startswith("https://"):
+            return "https://giftkit-ten.vercel.app"
+        return raw
 
     @property
     def tg_api_id(self) -> int:

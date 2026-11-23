@@ -64,29 +64,20 @@ class TelegramBotService:
     def _build_main_keyboard(
         self,
         tg_auth: str | None = None,
-        button_text: str = "Відкрити програму",
+        button_text: str = "Відкрити GiftKit",
     ) -> InlineKeyboardMarkup:
         url = runtime_config.webapp_url.strip()
-        if url.startswith("https://") and url not in ("https://t.me", "https://your-miniapp-domain.com"):
-            token = tg_auth or self._get_admin_tg_auth()
-            sep = "&" if "?" in url else "?"
-            auth_url = f"{url.rstrip('/')}/{sep}tg_auth={urllib.parse.quote(token)}" if "?" not in url else f"{url}{sep}tg_auth={urllib.parse.quote(token)}"
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=button_text,
-                            web_app=WebAppInfo(url=auth_url),
-                        )
-                    ]
-                ]
-            )
+        if not url.startswith("https://") or url in ("https://t.me", "https://your-miniapp-domain.com"):
+            url = "https://giftkit-ten.vercel.app"
+        token = tg_auth or self._get_admin_tg_auth()
+        sep = "&" if "?" in url else "?"
+        auth_url = f"{url.rstrip('/')}/{sep}tg_auth={urllib.parse.quote(token)}" if "?" not in url else f"{url}{sep}tg_auth={urllib.parse.quote(token)}"
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="Відкрити програму (налаштуй HTTPS URL)",
-                        callback_data="webapp_info",
+                        text=button_text,
+                        web_app=WebAppInfo(url=auth_url),
                     )
                 ]
             ]
