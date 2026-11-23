@@ -230,6 +230,7 @@ async def lifespan(app: FastAPI):
         await tonnel_client.close()
         await getgems_client.close()
         await multi_market.close()
+        await cloud_store.close()
         await db.close()
         logger.info("GiftKit backend stopped cleanly")
 
@@ -240,10 +241,27 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cloud_boot_hydrated = False
+
 
 @app.middleware("http")
 async def _ensure_db_middleware(request: Request, call_next):
+    global _cloud_boot_hydrated
     await db.ensure_initialized()
+    if IS_VERCEL and not _cloud_boot_hydrated and cloud_store.is_configured:
+        _cloud_boot_hydrated = True
+        try:
+            creds = await cloud_store.load_market_credentials()
+            if creds:
+                runtime_config.apply_overrides(creds)
+            snap = await cloud_store.load_mrkt_snapshot()
+            if isinstance(snap, dict):
+                mrkt_client.ingest_pushed_snapshot(
+                    collections=snap.get("collections") if isinstance(snap.get("collections"), dict) else None,
+                    listings=snap.get("listings") if isinstance(snap.get("listings"), list) else None,
+                )
+        except Exception as exc:
+            logger.debug(f"Vercel cold-start CloudStore hydrate skipped: {exc}")
     return await call_next(request)
 
 
