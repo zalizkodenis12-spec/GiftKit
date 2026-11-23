@@ -63,12 +63,6 @@ const TWINS_MARKETS = [
   { key: 'getgems', label: 'Getgems' },
   { key: 'fragment', label: 'Fragment' },
 ];
-const QUICK_TWINS_EXAMPLES = [
-  'Eternal Rose #3497',
-  'Plush Pepe',
-  'Homemade Cake Sweet Bite',
-  'B-Day Candle Neon Lights',
-];
 
 function getMarketCollectionUrl(
   market?: string,
@@ -855,16 +849,11 @@ export const SniperPage: React.FC<SniperPageProps> = ({
       {subTab === 'twins' && (
         <div className="space-y-3.5">
           {/* Universal Gift Input Card */}
-          <section className="ton-card rounded-2xl p-3.5 sm:p-4 space-y-3">
-            <div>
-              <h2 className="font-display text-[15px] font-extrabold text-[#0B1120] flex items-center gap-1.5">
-                <Copy className="w-4 h-4 text-[#0098EA]" />
-                Пошук двійників 1:1 по вигляду
-              </h2>
-              <p className="text-[11.5px] text-[#64748B] mt-0.5">
-                Вставте посилання (t.me/nft/..., Fragment, Getgems), назву + номер або модель — знайдемо сам подарунок і всіх його візуальних двійників на всіх 5 маркетах
-              </p>
-            </div>
+          <section className="ton-card rounded-2xl p-3.5 sm:p-4 space-y-2.5">
+            <h2 className="font-display text-[15px] font-extrabold text-[#0B1120] flex items-center gap-1.5">
+              <Copy className="w-4 h-4 text-[#0098EA]" />
+              Пошук двійників 1:1 по вигляду
+            </h2>
 
             <form
               onSubmit={(e) => {
@@ -880,7 +869,7 @@ export const SniperPage: React.FC<SniperPageProps> = ({
                   type="text"
                   value={twinsQuery}
                   onChange={(e) => setTwinsQuery(e.target.value)}
-                  placeholder="Напр.: t.me/nft/EternalRose-3497 або Plush Pepe #123..."
+                  placeholder="Посилання, назва #номер або модель..."
                   className="w-full h-10 pl-9 pr-8 rounded-xl bg-[#F4F7FB] border border-[#E2E8F0] focus:border-[#0098EA] focus:bg-white text-xs font-semibold text-[#0B1120] placeholder:text-[#94A3B8] focus:outline-none transition-colors"
                 />
                 {twinsQuery && (
@@ -912,25 +901,6 @@ export const SniperPage: React.FC<SniperPageProps> = ({
                 )}
               </button>
             </form>
-
-            {/* Quick Example Chips */}
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[10.5px] font-bold text-[#64748B]">Приклади:</span>
-              {QUICK_TWINS_EXAMPLES.map((ex) => (
-                <button
-                  key={ex}
-                  type="button"
-                  onClick={() => {
-                    haptic('light');
-                    setTwinsQuery(ex);
-                    runTwinsSearch({ query: ex });
-                  }}
-                  className="px-2.5 py-1 rounded-lg bg-[#F4F7FB] hover:bg-[#E8F5FE] border border-[#E2E8F0] hover:border-[#BAE3FC] text-[10.5px] font-bold text-[#334155] hover:text-[#0077C8] transition-colors cursor-pointer"
-                >
-                  {ex}
-                </button>
-              ))}
-            </div>
           </section>
 
           {/* Error Banner */}
