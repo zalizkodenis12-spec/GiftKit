@@ -213,5 +213,156 @@ class GetgemsAndTonClient:
             logger.debug(f"Getgems on-sale fetch failed for {short}: {exc}")
         return []
 
+    async def search_nfts(
+        self,
+        *,
+        collection_short: str | None = None,
+        sort: str = "price_asc",
+        limit: int = 30,
+        page: int = 0,
+        search: str | None = None,
+        force_refresh: bool = False,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Fetch real live on-sale Getgems NFTs via official TonAPI v2 (zero API keys required)."""
+        import re
+        from backend.database import utc_now_iso
+
+        clean_col = re.sub(r"[^a-z0-9]", "", (collection_short or "").strip().lower())
+        clean_search = (search or "").strip().lstrip("#").lower()
+        page_num = max(0, int(page or 0))
+        safe_limit = max(10, min(int(limit or 30), 50))
+
+        # Select collection addresses to scan
+        all_known = [
+            (k, v)
+            for k, v in KNOWN_GIFT_COLLECTION_ADDRESSES.items()
+            if v and "placeholder" not in v
+        ]
+        if clean_col:
+            addr = KNOWN_GIFT_COLLECTION_ADDRESSES.get(clean_col)
+            if not addr or "placeholder" in addr:
+                return [], False
+            targets = [(clean_col, addr)]
+        else:
+            # Rotate across known collections by page for infinite scroll
+            per_page = 4
+            start_idx = (page_num * per_page) % max(len(all_known), 1)
+            targets = all_known[start_idx : start_idx + per_page]
+            if not targets:
+                targets = all_known[:per_page]
+
+        cache_key = f"gg_tonapi:{clean_col}:{page_num}:{clean_search}"
+        now = time.monotonic()
+        if not force_refresh and cache_key in self._listings_cache and now < self._listings_cache[cache_key][1]:
+            cached_items = self._listings_cache[cache_key][0]
+            return cached_items[:safe_limit], (len(all_known) > 4 if not clean_col else False)
+
+        client = self._get_client()
+        collected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        async def _fetch_col(short_k: str, col_addr: str) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            offset = page_num * 100 if clean_col else 0
+            try:
+                resp = await client.get(
+                    f"{TONAPI_BASE}/nfts/collections/{col_addr}/items",
+                    params={"limit": 100, "offset": offset},
+                )
+                if resp.status_code != 200:
+                    return out
+                nft_items = resp.json().get("nft_items") or []
+                for it in nft_items:
+                    if not isinstance(it, dict):
+                        continue
+                    sale = it.get("sale")
+                    if not isinstance(sale, dict):
+                        continue
+                    price_obj = sale.get("price") or {}
+                    cur_type = str(price_obj.get("currency_type") or "").lower()
+                    tok_name = str(price_obj.get("token_name") or "").upper()
+                    if cur_type != "native" and tok_name != "TON":
+                        continue
+                    decimals = int(price_obj.get("decimals") or 9)
+                    raw_val = to_float(price_obj.get("value"), 0.0)
+                    price_ton = round(raw_val / (10 ** decimals), 2) if raw_val > 0 else 0.0
+                    if price_ton <= 0:
+                        continue
+
+                    addr = str(it.get("address") or "").strip()
+                    if not addr:
+                        continue
+                    meta = it.get("metadata") or {}
+                    full_name = str(meta.get("name") or "").strip()
+                    col_name = full_name.split("#", 1)[0].strip() if "#" in full_name else str((it.get("collection") or {}).get("name") or short_k.title())
+                    if col_name.endswith("s") and col_name.lower().replace(" ", "") != short_k:
+                        # e.g. "Eternal Roses" -> "Eternal Rose"
+                        if col_name[:-1].lower().replace(" ", "") == short_k:
+                            col_name = col_name[:-1]
+                    num_m = re.search(r"#(\d+)", full_name)
+                    number = int(num_m.group(1)) if num_m else 0
+                    if number <= 0:
+                        continue
+
+                    raw_attrs = meta.get("attributes") or []
+                    attrs: list[dict[str, Any]] = []
+                    for a in raw_attrs:
+                        if not isinstance(a, dict):
+                            continue
+                        tt = str(a.get("trait_type") or "").strip().lower()
+                        val = str(a.get("value") or "").strip()
+                        if tt in ("model", "backdrop", "symbol") and val:
+                            attrs.append({"type": tt, "value": val, "rarity_per_mille": 1.5})
+
+                    if clean_search:
+                        hay = f"{col_name} {number} " + " ".join(a["value"] for a in attrs)
+                        if clean_search not in hay.lower():
+                            continue
+
+                    pascal_col = re.sub(r"[^a-zA-Z0-9]", "", col_name)
+                    tg_id = f"{pascal_col}-{number}"
+                    photo_url = str(meta.get("image") or "").strip()
+                    if not photo_url:
+                        photo_url = f"https://nft.fragment.com/gift/{short_k}-{number}.large.jpg"
+
+                    out.append(
+                        {
+                            "id": f"getgems-{addr}",
+                            "tg_id": tg_id,
+                            "name": col_name,
+                            "external_collection_number": number,
+                            "price": str(price_ton),
+                            "floor_price": str(price_ton),
+                            "photo_url": photo_url,
+                            "attributes": attrs,
+                            "listed_at": utc_now_iso(),
+                            "market": "getgems",
+                            "market_url": f"https://getgems.io/nft/{addr}",
+                        }
+                    )
+            except Exception as exc:
+                logger.debug(f"TonAPI Getgems fetch error ({short_k}): {exc}")
+            return out
+
+        batches = await asyncio.gather(*(_fetch_col(sk, ca) for sk, ca in targets), return_exceptions=True)
+        for b in batches:
+            if isinstance(b, list):
+                for item in b:
+                    iid = item["id"]
+                    if iid not in seen:
+                        seen.add(iid)
+                        collected.append(item)
+
+        if collected:
+            self.getgems_live_ok = True
+            if sort == "price_desc":
+                collected.sort(key=lambda x: to_float(x.get("price"), 0.0), reverse=True)
+            else:
+                collected.sort(key=lambda x: to_float(x.get("price"), 0.0))
+            self._listings_cache[cache_key] = (collected, time.monotonic() + 60.0)
+
+        has_more = (len(all_known) > (page_num + 1) * 4) if not clean_col else (len(collected) >= 3)
+        return collected[:safe_limit], has_more
+
 
 getgems_client = GetgemsAndTonClient()

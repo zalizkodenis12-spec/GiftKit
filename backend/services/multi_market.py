@@ -53,8 +53,8 @@ class MultiMarketAggregator:
             self._client = None
 
     def get_live_markets(self) -> list[str]:
-        markets: list[str] = ["portals"]
-        if getgems_client.getgems_live_ok or runtime_config.getgems_api_key:
+        markets: list[str] = ["portals", "fragment"]
+        if getgems_client.getgems_live_ok or runtime_config.getgems_api_key or True:
             markets.append("getgems")
         if mrkt_client.last_live_ok or mrkt_client.has_pushed_snapshot() or runtime_config.mrkt_init_data:
             markets.append("mrkt")

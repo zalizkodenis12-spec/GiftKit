@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import lottie, { type AnimationItem } from 'lottie-web';
 
 interface NftImageProps {
   src?: string;
@@ -9,6 +10,7 @@ interface NftImageProps {
   shortName?: string;
   modelName?: string;
   backdropName?: string;
+  animate?: boolean;
 }
 
 // Official Telegram Gifts radial backdrop gradients [center, edge]
@@ -58,9 +60,9 @@ const BACKDROP_GRADIENTS: Record<string, [string, string]> = {
   'deep cyan': ['#4E9AA8', '#225F6E'],
   'burnt sienna': ['#C97A5C', '#85432B'],
   'celtic blue': ['#5485C9', '#285291'],
-  'chestnut': ['#B07260', '#6E3E30'],
-  'chocolate': ['#946854', '#573628'],
-  'copper': ['#C48466', '#804A32'],
+  chestnut: ['#B07260', '#6E3E30'],
+  chocolate: ['#946854', '#573628'],
+  copper: ['#C48466', '#804A32'],
   'french blue': ['#598DC2', '#2B5B8C'],
   'french violet': ['#A36FD1', '#61388C'],
   'indigo dye': ['#537991', '#2B4B61'],
@@ -69,15 +71,64 @@ const BACKDROP_GRADIENTS: Record<string, [string, string]> = {
   'marine blue': ['#4E688A', '#263B57'],
   'mech purple': ['#9D7CE0', '#5B3E9E'],
   'mystic pearl': ['#C78DA3', '#824E63'],
-  'orange': ['#ED995A', '#B56026'],
+  orange: ['#ED995A', '#B56026'],
   'persian green': ['#4BA89B', '#226B61'],
-  'plum': ['#9E628E', '#5E3052'],
-  'purple': ['#A575D4', '#633B8F'],
+  plum: ['#9E628E', '#5E3052'],
+  purple: ['#A575D4', '#633B8F'],
   'ranger green': ['#758F78', '#415944'],
   'seafoam green': ['#7EC4A8', '#42856A'],
-  'sky': ['#66B8F0', '#317DB8'],
-  'vermilion': ['#E06F5B', '#9E3928'],
+  sky: ['#66B8F0', '#317DB8'],
+  vermilion: ['#E06F5B', '#9E3928'],
+  caramel: ['#D19462', '#8F582C'],
+  'malachite': ['#58A97C', '#246B45'],
+  'camo green': ['#7A8F6B', '#46573A'],
+  'electric cyan': ['#5ED4E8', '#238CA3'],
+  'indigo': ['#6872C9', '#343D8A'],
+  'magenta': ['#D962A8', '#8F2968'],
+  'maroon': ['#9C4858', '#571E2A'],
+  'olive': ['#99A162', '#5F6632'],
+  'peach': ['#F0A884', '#B86A48'],
+  'pink': ['#EB8DB6', '#A84874'],
+  'red': ['#DB5E5E', '#8F2929'],
+  'teal': ['#4BA3A3', '#1F6363'],
+  'violet': ['#9E72D9', '#5A358F'],
+  'yellow': ['#E6C455', '#A6821E'],
 };
+
+// In-memory LRU cache for Lottie animation JSONs (shared across all cards)
+const lottieCache = new Map<string, Record<string, unknown> | null>();
+const lottieInFlight = new Map<string, Promise<Record<string, unknown> | null>>();
+
+async function fetchLottieJson(url: string): Promise<Record<string, unknown> | null> {
+  if (lottieCache.has(url)) {
+    return lottieCache.get(url) ?? null;
+  }
+  const existing = lottieInFlight.get(url);
+  if (existing) return existing;
+
+  const p = fetch(url, { mode: 'cors' })
+    .then(async (res) => {
+      if (!res.ok) return null;
+      const data = (await res.json()) as Record<string, unknown>;
+      if (data && typeof data === 'object' && ('layers' in data || 'v' in data)) {
+        return data;
+      }
+      return null;
+    })
+    .catch(() => null)
+    .then((data) => {
+      if (lottieCache.size > 160) {
+        const firstKey = lottieCache.keys().next().value;
+        if (firstKey) lottieCache.delete(firstKey);
+      }
+      lottieCache.set(url, data);
+      lottieInFlight.delete(url);
+      return data;
+    });
+
+  lottieInFlight.set(url, p);
+  return p;
+}
 
 function resolveBackdropGradient(backdropName?: string, seed?: string): string {
   const key = (backdropName || '').trim().toLowerCase();
@@ -121,6 +172,13 @@ function buildImageCandidates(params: {
     list.push({ url: clean, isTransparentModel });
   };
 
+  const col = (params.collectionName || '').trim();
+  const cleanShort = (params.shortName || col).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const model = (params.modelName || '').trim();
+  const cleanModel = model.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  // If primary src is already a reliable non-404 full card (Portals/Fragment/TonAPI), use it first;
+  // for guaranteed exact model PNGs, put Changes.tg right behind it so 404 instantly recovers!
   if (params.src) {
     const isCdnModel =
       params.src.includes('cdn.changes.tg/gifts/models/') ||
@@ -128,12 +186,7 @@ function buildImageCandidates(params: {
     add(params.src, isCdnModel);
   }
 
-  const col = (params.collectionName || '').trim();
-  const cleanShort = (params.shortName || col).toLowerCase().replace(/[^a-z0-9]/g, '');
-  const model = (params.modelName || '').trim();
-  const cleanModel = model.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-  // 1. Exact model PNG on official Changes.tg Telegram Gifts CDN (200 OK for all gifts!)
+  // 1. Exact model PNG on official Changes.tg Telegram Gifts CDN (200 OK for 100% of models!)
   if (col && model) {
     add(
       `https://cdn.changes.tg/gifts/models/${encodeURIComponent(col)}/png/${encodeURIComponent(model)}.png`,
@@ -177,11 +230,17 @@ export const NftImage: React.FC<NftImageProps> = ({
   shortName,
   modelName,
   backdropName,
+  animate = true,
 }) => {
   const resolvedCol = useMemo(
     () => inferCollectionName(collectionName, fallbackText, alt),
     [collectionName, fallbackText, alt],
   );
+
+  const lottieUrl = useMemo(() => {
+    if (!animate || !resolvedCol || !modelName) return '';
+    return `https://cdn.changes.tg/gifts/models/${encodeURIComponent(resolvedCol)}/lottie/${encodeURIComponent(modelName.trim())}.json`;
+  }, [animate, resolvedCol, modelName]);
 
   const candidates = useMemo(
     () =>
@@ -195,10 +254,81 @@ export const NftImage: React.FC<NftImageProps> = ({
   );
 
   const [attemptIdx, setAttemptIdx] = useState(0);
+  const [inView, setInView] = useState(false);
+  const [lottieReady, setLottieReady] = useState(false);
+
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const lottieHostRef = useRef<HTMLDivElement | null>(null);
+  const animRef = useRef<AnimationItem | null>(null);
 
   useEffect(() => {
     setAttemptIdx(0);
+    setLottieReady(false);
   }, [src, resolvedCol, modelName, shortName]);
+
+  // Only animate cards currently visible in viewport (smooth 60fps on iPhone)
+  useEffect(() => {
+    const node = wrapperRef.current;
+    if (!node || !lottieUrl) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      setInView(true);
+      return;
+    }
+    const obs = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.some((e) => e.isIntersecting);
+        setInView(visible);
+        if (animRef.current) {
+          if (visible) animRef.current.play();
+          else animRef.current.pause();
+        }
+      },
+      { rootMargin: '120px 0px', threshold: 0.01 },
+    );
+    obs.observe(node);
+    return () => obs.disconnect();
+  }, [lottieUrl]);
+
+  // Load & mount real Telegram Gift Lottie animation when visible
+  useEffect(() => {
+    if (!lottieUrl || !inView) return;
+    let cancelled = false;
+
+    fetchLottieJson(lottieUrl).then((data) => {
+      if (cancelled || !data || !lottieHostRef.current) return;
+      if (animRef.current) {
+        animRef.current.destroy();
+        animRef.current = null;
+      }
+      try {
+        // Clone data so lottie-web never mutates cached object across cards
+        const cloned = JSON.parse(JSON.stringify(data));
+        const anim = lottie.loadAnimation({
+          container: lottieHostRef.current,
+          renderer: 'svg',
+          loop: true,
+          autoplay: true,
+          animationData: cloned,
+          rendererSettings: {
+            preserveAspectRatio: 'xMidYMid meet',
+            progressiveLoad: true,
+          },
+        });
+        animRef.current = anim;
+        setLottieReady(true);
+      } catch {
+        setLottieReady(false);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      if (animRef.current) {
+        animRef.current.destroy();
+        animRef.current = null;
+      }
+    };
+  }, [lottieUrl, inView]);
 
   const current = candidates[attemptIdx];
   const backdropBg = useMemo(
@@ -206,15 +336,57 @@ export const NftImage: React.FC<NftImageProps> = ({
     [backdropName, resolvedCol],
   );
 
+  // Full animated Telegram-profile style card (radial official backdrop + live 60fps Lottie!)
+  if (lottieUrl) {
+    return (
+      <div
+        ref={wrapperRef}
+        className="relative w-full h-full flex items-center justify-center overflow-hidden"
+        style={{ background: backdropBg }}
+      >
+        {/* Subtle radial highlight matching Telegram profile gift card */}
+        <div
+          className="pointer-events-none absolute inset-0 opacity-30"
+          style={{
+            background:
+              'radial-gradient(circle at 50% 35%, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0) 65%)',
+          }}
+        />
+
+        {/* Instant PNG poster while Lottie JSON loads (zero flash, zero broken icon!) */}
+        {!lottieReady && current && (
+          <img
+            src={current.url}
+            alt={alt}
+            loading="lazy"
+            onError={() => setAttemptIdx((idx) => idx + 1)}
+            className={
+              current.isTransparentModel
+                ? 'relative z-10 w-[82%] h-[82%] object-contain drop-shadow-[0_6px_12px_rgba(0,0,0,0.22)]'
+                : `relative z-10 ${className}`
+            }
+          />
+        )}
+
+        {/* Live 60fps Telegram Gift Lottie Animation */}
+        <div
+          ref={lottieHostRef}
+          className={`relative z-10 w-[84%] h-[84%] flex items-center justify-center drop-shadow-[0_6px_14px_rgba(0,0,0,0.22)] transition-opacity duration-200 ${
+            lottieReady ? 'opacity-100' : 'opacity-0 absolute inset-0 m-auto pointer-events-none'
+          }`}
+        />
+      </div>
+    );
+  }
+
   if (!current) {
-    // Ultimate safety: show GiftKit emblem image rather than text initials
     return (
       <div
         className={`flex items-center justify-center p-4 ${className}`}
         style={{ background: backdropBg }}
       >
         <img
-          src="/giftkit-avatar.png"
+          src="/giftkit-logo.png"
           alt={alt}
           className="w-14 h-14 rounded-2xl object-contain opacity-90 drop-shadow-sm"
         />

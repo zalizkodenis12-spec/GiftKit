@@ -212,7 +212,6 @@ class TonnelClient:
         clean_short = re.sub(r"[^a-z0-9]", "", col_name.lower())
         pascal_col = re.sub(r"[^a-zA-Z0-9]", "", col_name)
         tg_slug = f"{pascal_col}-{number}" if number > 0 else pascal_col
-        photo_url = f"https://nft.fragment.com/gift/{clean_short}-{number}.large.jpg" if (clean_short and number > 0) else ""
 
         def _parse_trait(raw_val: Any) -> tuple[str, float]:
             txt = str(raw_val or "").strip()
@@ -236,6 +235,17 @@ class TonnelClient:
         s_name, s_rar = _parse_trait(g.get("symbol"))
         if s_name:
             attributes.append({"type": "symbol", "value": s_name, "rarity_per_mille": s_rar})
+
+        # Official Changes.tg model PNG returns 200 OK for 100% of both off-chain and on-chain Tonnel gifts!
+        if col_name and m_name:
+            photo_url = (
+                f"https://cdn.changes.tg/gifts/models/"
+                f"{urllib.parse.quote(col_name)}/png/{urllib.parse.quote(m_name)}.png"
+            )
+        elif clean_short and number > 0:
+            photo_url = f"https://nft.fragment.com/gift/{clean_short}-{number}.large.jpg"
+        else:
+            photo_url = ""
 
         return {
             "id": f"tonnel-{gift_id}",

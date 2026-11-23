@@ -26,6 +26,7 @@ from backend.models import (
     VerdictType,
     WhaleEvent,
 )
+from backend.services.fragment_client import fragment_client
 from backend.services.getgems_client import getgems_client
 from backend.services.mrkt_client import mrkt_client
 from backend.services.multi_market import MARKET_FEES, multi_market
@@ -198,6 +199,7 @@ class AnalyticsEngine:
         portals_client.clear_cache()
         mrkt_client.clear_cache()
         tonnel_client.clear_cache()
+        fragment_client.clear_cache()
 
     async def inspect_thin_floor(
         self, collection_id: str, short_name: str, floor_price: float
@@ -602,6 +604,8 @@ class AnalyticsEngine:
             (market == "portals" and portals_client.last_live_ok)
             or (market == "mrkt" and mrkt_client.last_live_ok)
             or (market == "tonnel" and tonnel_client.last_live_ok)
+            or (market == "getgems" and getgems_client.getgems_live_ok)
+            or (market == "fragment" and fragment_client.last_live_ok)
         )
 
         return AnalyzedListing(
@@ -758,10 +762,12 @@ class AnalyticsEngine:
             for m in (market or "").split(",")
             if m.strip() and m.strip().lower() != "all"
         }
-        only_external = bool(wanted_markets) and wanted_markets.issubset({"mrkt", "tonnel"})
+        only_external = bool(wanted_markets) and wanted_markets.issubset({"mrkt", "tonnel", "getgems", "fragment"})
         mrkt_ready = bool(runtime_config.mrkt_init_data) or mrkt_client.has_pushed_snapshot()
         want_mrkt = mrkt_ready and ((not wanted_markets) or ("mrkt" in wanted_markets))
         want_tonnel = bool(runtime_config.tonnel_init_data) and ((not wanted_markets) or ("tonnel" in wanted_markets))
+        want_getgems = (not wanted_markets) or ("getgems" in wanted_markets)
+        want_fragment = (not wanted_markets) or ("fragment" in wanted_markets)
 
         now = time.monotonic()
         use_global_cache = (
@@ -811,7 +817,7 @@ class AnalyticsEngine:
                     used_price_ladder = False
 
                     if only_external:
-                        # Dedicated live MRKT and/or Tonnel feed with full pagination
+                        # Dedicated live MRKT, Tonnel, Getgems and/or Fragment feed with full pagination
                         if want_mrkt:
                             m_items, m_more = await mrkt_client.search_nfts(
                                 collection_name=col_display_name,
@@ -835,6 +841,30 @@ class AnalyticsEngine:
                             )
                             merged_raw.extend(t_items)
                             if t_more:
+                                has_more = True
+                        if want_getgems:
+                            g_items, g_more = await getgems_client.search_nfts(
+                                collection_short=clean_collection or None,
+                                sort=sort,
+                                limit=batch_limit,
+                                page=page_num,
+                                search=portals_search,
+                                force_refresh=force_refresh,
+                            )
+                            merged_raw.extend(g_items)
+                            if g_more:
+                                has_more = True
+                        if want_fragment:
+                            f_items, f_more = await fragment_client.search_nfts(
+                                collection_short=clean_collection or None,
+                                sort=sort,
+                                limit=batch_limit,
+                                page=page_num,
+                                search=portals_search,
+                                force_refresh=force_refresh,
+                            )
+                            merged_raw.extend(f_items)
+                            if f_more:
                                 has_more = True
                     elif col_id_param or portals_search:
                         if sort == "price_asc":
@@ -1054,6 +1084,36 @@ class AnalyticsEngine:
                                     has_more = True
                             except Exception as exc:
                                 logger.debug(f"Tonnel blend skipped: {exc}")
+                        if want_fragment and page_num <= 2:
+                            try:
+                                f_items, f_more = await fragment_client.search_nfts(
+                                    collection_short=clean_collection or None,
+                                    sort=sort,
+                                    limit=12,
+                                    page=page_num,
+                                    search=portals_search,
+                                    force_refresh=force_refresh,
+                                )
+                                merged_raw.extend(f_items)
+                                if f_more:
+                                    has_more = True
+                            except Exception as exc:
+                                logger.debug(f"Fragment blend skipped: {exc}")
+                        if want_getgems and page_num <= 2:
+                            try:
+                                g_items, g_more = await getgems_client.search_nfts(
+                                    collection_short=clean_collection or None,
+                                    sort=sort,
+                                    limit=8,
+                                    page=page_num,
+                                    search=portals_search,
+                                    force_refresh=force_refresh,
+                                )
+                                merged_raw.extend(g_items)
+                                if g_more:
+                                    has_more = True
+                            except Exception as exc:
+                                logger.debug(f"Getgems blend skipped: {exc}")
 
                     # Deduplicate merged_raw
                     seen_raw: set[str] = set()
